@@ -1,15 +1,22 @@
-import { Clock } from "lucide-react";
+import { ChevronRight, Clock, LayoutDashboard } from "lucide-react";
 import { useMemo } from "react";
 import { VideoCard } from "../components/VideoCard";
+import { useAuth } from "../hooks/useAuth";
 import type { Video } from "../types/video";
 import { getHistory } from "../utils/videoStorage";
 
 interface HistoryViewProps {
   videos: Video[];
   onVideoClick: (video: Video) => void;
+  onCreatorDashboard?: () => void;
 }
 
-export function HistoryView({ videos, onVideoClick }: HistoryViewProps) {
+export function HistoryView({
+  videos,
+  onVideoClick,
+  onCreatorDashboard,
+}: HistoryViewProps) {
+  const { user } = useAuth();
   const history = useMemo(() => getHistory(), []);
 
   const historyVideos = useMemo(() => {
@@ -23,6 +30,26 @@ export function HistoryView({ videos, onVideoClick }: HistoryViewProps) {
 
   return (
     <div className="px-3 pt-4 pb-24 animate-fade-in">
+      {user && onCreatorDashboard && (
+        <button
+          type="button"
+          data-ocid="history.creator_dashboard.button"
+          onClick={onCreatorDashboard}
+          className="w-full mb-4 flex items-center gap-3 bg-card border border-border rounded-2xl px-4 py-3.5 hover:bg-secondary/40 active:bg-secondary/60 transition-colors text-left shadow-card"
+        >
+          <div className="w-9 h-9 rounded-xl bg-primary/20 flex items-center justify-center shrink-0">
+            <LayoutDashboard className="w-5 h-5 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold">Creator Dashboard</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Manage videos, playlists, community & earnings
+            </p>
+          </div>
+          <ChevronRight className="w-4 h-4 text-muted-foreground/50 shrink-0" />
+        </button>
+      )}
+
       <h1 className="text-lg font-bold mb-4">Watch History</h1>
 
       {historyVideos.length === 0 ? (

@@ -596,7 +596,7 @@ export function VideoDetailView({
     // Backend call (fire-and-forget)
     if (actor) {
       actor
-        .toggleLike(currentVideo.id)
+        .toggleLike(currentVideo.id, userId)
         .catch((e) => console.warn("[like] backend call failed:", e));
     }
 
@@ -641,7 +641,7 @@ export function VideoDetailView({
     // Backend call (fire-and-forget)
     if (actor) {
       actor
-        .toggleDislike(currentVideo.id)
+        .toggleDislike(currentVideo.id, userId)
         .catch((e) => console.warn("[dislike] backend call failed:", e));
     }
   }, [currentVideo, isLoggedIn, userId, onVideoUpdate, actor]);
@@ -676,7 +676,7 @@ export function VideoDetailView({
     // Backend call (fire-and-forget)
     if (actor) {
       actor
-        .addComment(currentVideo.id, comment.text)
+        .addComment(currentVideo.id, comment.text, userId)
         .catch((e) => console.warn("[comment] backend call failed:", e));
     }
 
@@ -694,7 +694,15 @@ export function VideoDetailView({
         videoId: currentVideo.id,
       });
     }
-  }, [commentText, isLoggedIn, user, currentVideo, onVideoUpdate, actor]);
+  }, [
+    commentText,
+    isLoggedIn,
+    user,
+    userId,
+    currentVideo,
+    onVideoUpdate,
+    actor,
+  ]);
 
   const hasLiked = (currentVideo.likedBy ?? []).includes(userId);
   const hasDisliked = (currentVideo.dislikedBy ?? []).includes(userId);

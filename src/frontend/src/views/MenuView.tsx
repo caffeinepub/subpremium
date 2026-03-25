@@ -14,6 +14,7 @@ import {
   Check,
   ChevronRight,
   Globe,
+  LayoutDashboard,
   Loader2,
   LogIn,
   LogOut,
@@ -32,6 +33,7 @@ type SettingsPage = "privacy" | "preferences" | "language" | "display";
 interface MenuViewProps {
   onLoginClick: () => void;
   onSettingsClick: (page: SettingsPage) => void;
+  onCreatorDashboard?: () => void;
 }
 
 const SETTINGS_ITEMS: {
@@ -45,7 +47,11 @@ const SETTINGS_ITEMS: {
   { icon: Monitor, label: "Display", page: "display" },
 ];
 
-export function MenuView({ onLoginClick, onSettingsClick }: MenuViewProps) {
+export function MenuView({
+  onLoginClick,
+  onSettingsClick,
+  onCreatorDashboard,
+}: MenuViewProps) {
   const { user, logout, updateProfile } = useAuth();
 
   const [isEditing, setIsEditing] = useState(false);
@@ -285,6 +291,27 @@ export function MenuView({ onLoginClick, onSettingsClick }: MenuViewProps) {
         className="hidden"
         onChange={handleAvatarUpload}
       />
+
+      {/* ── Creator Dashboard ── */}
+      {user && onCreatorDashboard && (
+        <button
+          type="button"
+          data-ocid="menu.creator_dashboard.button"
+          onClick={onCreatorDashboard}
+          className="w-full mb-4 flex items-center gap-3 bg-card border border-border rounded-2xl px-4 py-3.5 hover:bg-secondary/40 active:bg-secondary/60 transition-colors text-left shadow-card"
+        >
+          <div className="w-9 h-9 rounded-xl bg-primary/20 flex items-center justify-center shrink-0">
+            <LayoutDashboard className="w-5 h-5 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold">Creator Dashboard</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Videos, playlists, community & earnings
+            </p>
+          </div>
+          <ChevronRight className="w-4 h-4 text-muted-foreground/50 shrink-0" />
+        </button>
+      )}
 
       {/* ── Settings Section ── */}
       <div className="bg-card rounded-2xl overflow-hidden mb-4 shadow-card">

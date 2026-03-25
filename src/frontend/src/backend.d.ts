@@ -87,7 +87,7 @@ export enum UserRole {
     guest = "guest"
 }
 export interface backendInterface {
-    addComment(videoId: string, text: string): Promise<boolean>;
+    addComment(videoId: string, text: string, userId: string): Promise<boolean>;
     addVideo(videoInput: VideoInput): Promise<VideoRecord>;
     assignCallerUserRole(user: Principal, role: UserRole): Promise<void>;
     deleteVideo(videoId: string): Promise<boolean>;
@@ -103,8 +103,8 @@ export interface backendInterface {
     logoutUser(token: string): Promise<void>;
     registerUser(email: string, passwordHash: string, displayName: string): Promise<AuthResult>;
     searchVideos(searchTerm: string): Promise<Array<VideoRecord>>;
-    toggleDislike(videoId: string): Promise<boolean>;
-    toggleLike(videoId: string): Promise<boolean>;
+    toggleDislike(videoId: string, userId: string): Promise<boolean>;
+    toggleLike(videoId: string, userId: string): Promise<boolean>;
     updateVideoStatus(input: VideoUpdateInput): Promise<boolean>;
     validateSession(token: string): Promise<ProfileResult>;
 }

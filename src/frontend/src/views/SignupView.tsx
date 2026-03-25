@@ -46,16 +46,19 @@ export function SignupView({
     setError(null);
     setIsLoading(true);
 
-    // Hard 5s failsafe — always lets user in
+    // Hard 15s failsafe — only fires if server is completely unreachable
+    let failsafeFired = false;
     const failsafeTimer = setTimeout(() => {
+      failsafeFired = true;
       setIsLoading(false);
       loginAsGuest(email, displayName);
       onSuccess();
-    }, 5000);
+    }, 15000);
 
     try {
       const err = await signup(displayName, email, password);
       clearTimeout(failsafeTimer);
+      if (failsafeFired) return;
       setIsLoading(false);
       if (!err) {
         setSuccess(true);
@@ -69,6 +72,7 @@ export function SignupView({
       }
     } catch {
       clearTimeout(failsafeTimer);
+      if (failsafeFired) return;
       setIsLoading(false);
       loginAsGuest(email, displayName);
       onSuccess();

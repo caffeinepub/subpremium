@@ -41,4 +41,5 @@ export type ViewName =
   | "preferences"
   | "language"
   | "display"
-  | "profile";
+  | "profile"
+  | "creatorDashboard";

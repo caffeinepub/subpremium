@@ -92,7 +92,7 @@ actor {
     status : Text;
   };
 
-  // --- Stable state (Map is stable in mo:core) ---
+  // --- Stable state ---
 
   let usersByEmail = Map.empty<Text, UserRecord>();
   let usersById = Map.empty<Text, UserRecord>();
@@ -103,24 +103,35 @@ actor {
 
   let videos = Map.empty<Text, VideoRecord>();
 
-  // Map Principal to userId for authorization
+  // Kept for stable variable compatibility with previous deployment
+  let THIRTY_DAYS_NS : Int = 365 * 24 * 60 * 60 * 1_000_000_000;
   let principalToUserId = Map.empty<Principal, Text>();
 
-  let THIRTY_DAYS_NS : Int = 365 * 24 * 60 * 60 * 1_000_000_000;
+  let ONE_YEAR_NS : Int = 365 * 24 * 60 * 60 * 1_000_000_000;
 
   func makeToken() : Text {
     tokenCounter += 1;
     "sess_" # tokenCounter.toText() # "_" # Time.now().toText()
   };
 
-  // Helper to get userId from Principal
-  func getUserIdFromPrincipal(principal : Principal) : ?Text {
-    principalToUserId.get(principal)
+  // Validate session token and return userId, or null if invalid
+  func validateToken(token : Text) : ?Text {
+    switch (sessions.get(token)) {
+      case null { null };
+      case (?sess) {
+        if (Time.now() > sess.expiresAt) {
+          sessions.remove(token);
+          null
+        } else {
+          ?sess.userId
+        }
+      };
+    }
   };
 
   // --- Public API ---
 
-  public shared ({ caller }) func registerUser(email : Text, passwordHash : Text, displayName : Text) : async AuthResult {
+  public shared func registerUser(email : Text, passwordHash : Text, displayName : Text) : async AuthResult {
     switch (usersByEmail.get(email)) {
       case (?_) { return #err("Email already registered") };
       case null {};
@@ -136,11 +147,10 @@ actor {
     };
     usersByEmail.add(email, record);
     usersById.add(userId, record);
-    principalToUserId.add(caller, userId);
     #ok(userId)
   };
 
-  public shared ({ caller }) func loginUser(email : Text, passwordHash : Text) : async LoginResult {
+  public shared func loginUser(email : Text, passwordHash : Text) : async LoginResult {
     switch (usersByEmail.get(email)) {
       case null { return #err("Invalid email or password") };
       case (?user) {
@@ -151,24 +161,19 @@ actor {
         let session : SessionRecord = {
           token;
           userId = user.userId;
-          expiresAt = Time.now() + THIRTY_DAYS_NS;
+          expiresAt = Time.now() + ONE_YEAR_NS;
         };
         sessions.add(token, session);
-        principalToUserId.add(caller, user.userId);
         #ok({ token; userId = user.userId; displayName = user.displayName })
       };
     }
   };
 
   public func validateSession(token : Text) : async ProfileResult {
-    switch (sessions.get(token)) {
-      case null { return #err("Invalid session") };
-      case (?sess) {
-        if (Time.now() > sess.expiresAt) {
-          sessions.remove(token);
-          return #err("Session expired");
-        };
-        switch (usersById.get(sess.userId)) {
+    switch (validateToken(token)) {
+      case null { return #err("Invalid or expired session") };
+      case (?userId) {
+        switch (usersById.get(userId)) {
           case null { return #err("User not found") };
           case (?user) {
             #ok({ userId = user.userId; email = user.email; displayName = user.displayName })
@@ -186,23 +191,9 @@ actor {
     await validateSession(token)
   };
 
-  public shared ({ caller }) func addVideo(videoInput : VideoInput) : async VideoRecord {
-    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
-      Runtime.trap("Unauthorized: Only authenticated users can add videos");
-    };
+  // --- Video API (no principal-based auth — uses creatorId from input) ---
 
-    // Verify the caller is the creator
-    switch (getUserIdFromPrincipal(caller)) {
-      case null {
-        Runtime.trap("Unauthorized: User not found");
-      };
-      case (?userId) {
-        if (userId != videoInput.creatorId) {
-          Runtime.trap("Unauthorized: Cannot create video for another user");
-        };
-      };
-    };
-
+  public shared func addVideo(videoInput : VideoInput) : async VideoRecord {
     videoCounter += 1;
     let videoId = videoCounter.toText();
 
@@ -244,25 +235,10 @@ actor {
     videos.values().filter(func(video) { video.creatorId == creatorId }).toArray();
   };
 
-  public shared ({ caller }) func updateVideoStatus(input : VideoUpdateInput) : async Bool {
-    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
-      Runtime.trap("Unauthorized: Only authenticated users can update videos");
-    };
-
+  public shared func updateVideoStatus(input : VideoUpdateInput) : async Bool {
     switch (videos.get(input.videoId)) {
       case (null) { false };
       case (?video) {
-        // Only the creator or admin can update
-        let isCreator = switch (getUserIdFromPrincipal(caller)) {
-          case null { false };
-          case (?userId) { userId == video.creatorId };
-        };
-        let isAdmin = AccessControl.isAdmin(accessControlState, caller);
-
-        if (not (isCreator or isAdmin)) {
-          Runtime.trap("Unauthorized: Only the video creator or admin can update this video");
-        };
-
         let updatedVideo = { video with videoUrl = input.videoUrl; status = input.status };
         videos.add(input.videoId, updatedVideo);
         true;
@@ -270,53 +246,25 @@ actor {
     };
   };
 
-  public shared ({ caller }) func deleteVideo(videoId : Text) : async Bool {
-    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
-      Runtime.trap("Unauthorized: Only authenticated users can delete videos");
-    };
-
+  public shared func deleteVideo(videoId : Text) : async Bool {
     switch (videos.get(videoId)) {
       case (null) { false };
-      case (?video) {
-        // Only the creator or admin can delete
-        let isCreator = switch (getUserIdFromPrincipal(caller)) {
-          case null { false };
-          case (?userId) { userId == video.creatorId };
-        };
-        let isAdmin = AccessControl.isAdmin(accessControlState, caller);
-
-        if (not (isCreator or isAdmin)) {
-          Runtime.trap("Unauthorized: Only the video creator or admin can delete this video");
-        };
-
+      case (?_video) {
         videos.remove(videoId);
         true;
       };
     };
   };
 
-  public shared ({ caller }) func toggleLike(videoId : Text) : async Bool {
-    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
-      Runtime.trap("Unauthorized: Only authenticated users can like videos");
-    };
-
-    let userId = switch (getUserIdFromPrincipal(caller)) {
-      case null {
-        Runtime.trap("Unauthorized: User not found");
-      };
-      case (?id) { id };
-    };
-
+  // userId is passed explicitly (anonymous principal is unreliable for multi-user)
+  public shared func toggleLike(videoId : Text, userId : Text) : async Bool {
+    if (userId == "") { return false };
     switch (videos.get(videoId)) {
       case (null) { false };
       case (?video) {
         let hasLiked = video.likedBy.find(func(id) { id == userId }).isSome();
         let updatedLikedBy = if (hasLiked) { video.likedBy.filter(func(id) { id != userId }) } else { video.likedBy.concat([userId]) };
-        let updatedLikes = if (hasLiked) {
-          video.likes - 1;
-        } else {
-          video.likes + 1;
-        };
+        let updatedLikes = if (hasLiked) { video.likes - 1 } else { video.likes + 1 };
         let updatedVideo = { video with likedBy = updatedLikedBy; likes = updatedLikes };
         videos.add(videoId, updatedVideo);
         true;
@@ -324,18 +272,8 @@ actor {
     };
   };
 
-  public shared ({ caller }) func toggleDislike(videoId : Text) : async Bool {
-    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
-      Runtime.trap("Unauthorized: Only authenticated users can dislike videos");
-    };
-
-    let userId = switch (getUserIdFromPrincipal(caller)) {
-      case null {
-        Runtime.trap("Unauthorized: User not found");
-      };
-      case (?id) { id };
-    };
-
+  public shared func toggleDislike(videoId : Text, userId : Text) : async Bool {
+    if (userId == "") { return false };
     switch (videos.get(videoId)) {
       case (null) { false };
       case (?video) {
@@ -343,9 +281,7 @@ actor {
         let updatedDislikedBy = if (hasDisliked) { video.dislikedBy.filter(func(id) { id != userId }) } else {
           video.dislikedBy.concat([userId]);
         };
-        let updatedDislikes = if (hasDisliked) { video.dislikes - 1 } else {
-          video.dislikes + 1;
-        };
+        let updatedDislikes = if (hasDisliked) { video.dislikes - 1 } else { video.dislikes + 1 };
         let updatedVideo = { video with dislikedBy = updatedDislikedBy; dislikes = updatedDislikes };
         videos.add(videoId, updatedVideo);
         true;
@@ -353,22 +289,10 @@ actor {
     };
   };
 
-  public shared ({ caller }) func addComment(videoId : Text, text : Text) : async Bool {
-    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
-      Runtime.trap("Unauthorized: Only authenticated users can comment");
-    };
-
-    let userId = switch (getUserIdFromPrincipal(caller)) {
-      case null {
-        Runtime.trap("Unauthorized: User not found");
-      };
-      case (?id) { id };
-    };
-
+  public shared func addComment(videoId : Text, text : Text, userId : Text) : async Bool {
+    if (userId == "") { return false };
     let authorName = switch (usersById.get(userId)) {
-      case null {
-        Runtime.trap("User profile not found");
-      };
+      case null { "Anonymous" };
       case (?user) { user.displayName };
     };
 
@@ -401,8 +325,7 @@ actor {
     };
   };
 
-  public shared ({ caller }) func incrementViewCount(videoId : Text) : async Bool {
-    // Views can be incremented by anyone, including guests
+  public shared func incrementViewCount(videoId : Text) : async Bool {
     switch (videos.get(videoId)) {
       case (null) { false };
       case (?video) {

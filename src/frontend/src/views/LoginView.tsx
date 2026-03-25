@@ -34,16 +34,19 @@ export function LoginView({
     setError(null);
     setIsLoading(true);
 
-    // Hard 5s failsafe — always lets user in
+    // Hard 15s failsafe — only fires if server is completely unreachable
+    let failsafeFired = false;
     const failsafeTimer = setTimeout(() => {
+      failsafeFired = true;
       setIsLoading(false);
       loginAsGuest(email);
       onSuccess();
-    }, 5000);
+    }, 15000);
 
     try {
       const err = await login(email, password, rememberMe);
       clearTimeout(failsafeTimer);
+      if (failsafeFired) return; // failsafe already handled
       setIsLoading(false);
       if (!err) {
         onSuccess();
@@ -56,6 +59,7 @@ export function LoginView({
       }
     } catch {
       clearTimeout(failsafeTimer);
+      if (failsafeFired) return;
       setIsLoading(false);
       loginAsGuest(email);
       onSuccess();

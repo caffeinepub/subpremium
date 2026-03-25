@@ -187,7 +187,7 @@ export interface backendInterface {
     _caffeineStorageRefillCashier(refillInformation: _CaffeineStorageRefillInformation | null): Promise<_CaffeineStorageRefillResult>;
     _caffeineStorageUpdateGatewayPrincipals(): Promise<void>;
     _initializeAccessControlWithSecret(userSecret: string): Promise<void>;
-    addComment(videoId: string, text: string): Promise<boolean>;
+    addComment(videoId: string, text: string, userId: string): Promise<boolean>;
     addVideo(videoInput: VideoInput): Promise<VideoRecord>;
     assignCallerUserRole(user: Principal, role: UserRole): Promise<void>;
     deleteVideo(videoId: string): Promise<boolean>;
@@ -203,8 +203,8 @@ export interface backendInterface {
     logoutUser(token: string): Promise<void>;
     registerUser(email: string, passwordHash: string, displayName: string): Promise<AuthResult>;
     searchVideos(searchTerm: string): Promise<Array<VideoRecord>>;
-    toggleDislike(videoId: string): Promise<boolean>;
-    toggleLike(videoId: string): Promise<boolean>;
+    toggleDislike(videoId: string, userId: string): Promise<boolean>;
+    toggleLike(videoId: string, userId: string): Promise<boolean>;
     updateVideoStatus(input: VideoUpdateInput): Promise<boolean>;
     validateSession(token: string): Promise<ProfileResult>;
 }
@@ -309,17 +309,17 @@ export class Backend implements backendInterface {
             return result;
         }
     }
-    async addComment(arg0: string, arg1: string): Promise<boolean> {
+    async addComment(arg0: string, arg1: string, arg2: string): Promise<boolean> {
         if (this.processError) {
             try {
-                const result = await this.actor.addComment(arg0, arg1);
+                const result = await this.actor.addComment(arg0, arg1, arg2);
                 return result;
             } catch (e) {
                 this.processError(e);
                 throw new Error("unreachable");
             }
         } else {
-            const result = await this.actor.addComment(arg0, arg1);
+            const result = await this.actor.addComment(arg0, arg1, arg2);
             return result;
         }
     }
@@ -533,31 +533,31 @@ export class Backend implements backendInterface {
             return result;
         }
     }
-    async toggleDislike(arg0: string): Promise<boolean> {
+    async toggleDislike(arg0: string, arg1: string): Promise<boolean> {
         if (this.processError) {
             try {
-                const result = await this.actor.toggleDislike(arg0);
+                const result = await this.actor.toggleDislike(arg0, arg1);
                 return result;
             } catch (e) {
                 this.processError(e);
                 throw new Error("unreachable");
             }
         } else {
-            const result = await this.actor.toggleDislike(arg0);
+            const result = await this.actor.toggleDislike(arg0, arg1);
             return result;
         }
     }
-    async toggleLike(arg0: string): Promise<boolean> {
+    async toggleLike(arg0: string, arg1: string): Promise<boolean> {
         if (this.processError) {
             try {
-                const result = await this.actor.toggleLike(arg0);
+                const result = await this.actor.toggleLike(arg0, arg1);
                 return result;
             } catch (e) {
                 this.processError(e);
                 throw new Error("unreachable");
             }
         } else {
-            const result = await this.actor.toggleLike(arg0);
+            const result = await this.actor.toggleLike(arg0, arg1);
             return result;
         }
     }

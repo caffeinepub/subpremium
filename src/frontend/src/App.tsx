@@ -19,6 +19,7 @@ import {
 import { UploadManagerProvider } from "./hooks/useUploadManager";
 import type { Video, ViewName } from "./types/video";
 import { getVideos } from "./utils/videoStorage";
+import { CreatorDashboardView } from "./views/CreatorDashboardView";
 import { CreatorProfileView } from "./views/CreatorProfileView";
 import { DisplayView } from "./views/DisplayView";
 import { HistoryView } from "./views/HistoryView";
@@ -148,7 +149,10 @@ function AppInner() {
   // prevView: the last non-auth view the user was on, used for post-login return
   const [prevView, setPrevView] = useState<ViewName>("home");
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
-  const [videos, setVideos] = useState<Video[]>(() => getVideos());
+  // Initialize only with in-progress uploads from localStorage (not stale ready videos)
+  const [videos, setVideos] = useState<Video[]>(() =>
+    getVideos().filter((v) => v.status !== "ready"),
+  );
   const [searchQuery, setSearchQuery] = useState("");
   const [profileCreatorId, setProfileCreatorId] = useState("");
   const [profileCreatorName, setProfileCreatorName] = useState("");
@@ -279,14 +283,19 @@ function AppInner() {
 
   const isAuthView = AUTH_VIEWS.includes(currentView);
   const isSettingsView = SETTINGS_VIEWS.includes(currentView);
+  const isCreatorDashboard = currentView === "creatorDashboard";
   const showHeader =
     currentView !== "video" &&
     currentView !== "upload" &&
     currentView !== "profile" &&
     !isAuthView &&
-    !isSettingsView;
+    !isSettingsView &&
+    !isCreatorDashboard;
   const showBottomNav =
-    !isAuthView && !isSettingsView && currentView !== "profile";
+    !isAuthView &&
+    !isSettingsView &&
+    currentView !== "profile" &&
+    !isCreatorDashboard;
 
   return (
     <UploadManagerProvider
@@ -344,7 +353,8 @@ function AppInner() {
               currentView === "video" ||
               currentView === "profile" ||
               isAuthView ||
-              isSettingsView
+              isSettingsView ||
+              isCreatorDashboard
                 ? "0px"
                 : "104px",
             paddingBottom: "0px",
@@ -391,7 +401,11 @@ function AppInner() {
           )}
 
           {currentView === "history" && (
-            <HistoryView videos={videos} onVideoClick={handleVideoClick} />
+            <HistoryView
+              videos={videos}
+              onVideoClick={handleVideoClick}
+              onCreatorDashboard={() => handleNavChange("creatorDashboard")}
+            />
           )}
 
           {currentView === "watchlater" && (
@@ -402,6 +416,17 @@ function AppInner() {
             <MenuView
               onLoginClick={goToLogin}
               onSettingsClick={(page) => handleNavChange(page)}
+              onCreatorDashboard={() => handleNavChange("creatorDashboard")}
+            />
+          )}
+
+          {currentView === "creatorDashboard" && (
+            <CreatorDashboardView
+              userId={user?.userId ?? ""}
+              username={user?.username ?? user?.displayName ?? ""}
+              allVideos={videos}
+              onBack={() => handleNavChange("menu")}
+              onVideoClick={handleVideoClick}
             />
           )}
 
