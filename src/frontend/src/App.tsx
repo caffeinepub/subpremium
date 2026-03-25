@@ -40,6 +40,9 @@ const SETTINGS_VIEWS: ViewName[] = [
   "display",
 ];
 
+// Views that are auth-related — never use these as a "return to" destination
+const AUTH_VIEWS: ViewName[] = ["login", "signup"];
+
 function videoRecordToVideo(r: VideoRecord): Video {
   return {
     id: r.videoId,
@@ -142,6 +145,7 @@ function NotificationPopup({
 
 function AppInner() {
   const [currentView, setCurrentView] = useState<ViewName>("home");
+  // prevView: the last non-auth view the user was on, used for post-login return
   const [prevView, setPrevView] = useState<ViewName>("home");
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [videos, setVideos] = useState<Video[]>(() => getVideos());
@@ -149,7 +153,7 @@ function AppInner() {
   const [profileCreatorId, setProfileCreatorId] = useState("");
   const [profileCreatorName, setProfileCreatorName] = useState("");
   const { settings } = useSettings();
-  const { user, isLoading: authLoading } = useAuth();
+  const { user } = useAuth();
   const { actor, isFetching } = useActor();
   const { notifications, markAllRead, unreadCount } = useNotifications(
     user?.userId ?? "",
@@ -166,13 +170,14 @@ function AppInner() {
     applySettings(settings);
   }, [settings]);
 
-  // Fetch all videos from backend in background when actor is ready or user changes
+  // Fetch videos from backend as soon as actor is ready — never wait on auth
   useEffect(() => {
-    if (isFetching || authLoading || !actor) return;
+    if (isFetching || !actor) return;
 
-    // Re-fetch when user changes (login/logout)
-    if (lastUserIdRef.current === user?.userId) return;
-    lastUserIdRef.current = user?.userId ?? null;
+    // Re-fetch when user changes (login/logout) or actor first becomes available
+    const currentUserId = user?.userId ?? null;
+    if (lastUserIdRef.current === currentUserId) return;
+    lastUserIdRef.current = currentUserId;
 
     (async () => {
       try {
@@ -186,7 +191,7 @@ function AppInner() {
         // Fallback: keep localStorage videos as-is
       }
     })();
-  }, [actor, isFetching, authLoading, user?.userId]);
+  }, [actor, isFetching, user?.userId]);
 
   // Listen for new notifications to show popup
   useEffect(() => {
@@ -237,8 +242,9 @@ function AppInner() {
     (view: ViewName) => {
       if (view === currentView && view !== "video") return;
       if (view !== "video") setSelectedVideo(null);
-      if (view === "login" || view === "signup") {
-        setPrevView(currentView as ViewName);
+      // When navigating to login/signup, remember where we came from (non-auth views only)
+      if (AUTH_VIEWS.includes(view) && !AUTH_VIEWS.includes(currentView)) {
+        setPrevView(currentView);
       }
       setCurrentView(view);
       window.scrollTo(0, 0);
@@ -260,8 +266,8 @@ function AppInner() {
   }, []);
 
   const handleLoginSuccess = useCallback(() => {
-    const dest =
-      prevView === "login" || prevView === "signup" ? "home" : prevView;
+    // Always return to a safe non-auth view
+    const dest = AUTH_VIEWS.includes(prevView) ? "home" : prevView;
     setCurrentView(dest);
     window.scrollTo(0, 0);
   }, [prevView]);
@@ -271,7 +277,7 @@ function AppInner() {
     [handleNavChange],
   );
 
-  const isAuthView = currentView === "login" || currentView === "signup";
+  const isAuthView = AUTH_VIEWS.includes(currentView);
   const isSettingsView = SETTINGS_VIEWS.includes(currentView);
   const showHeader =
     currentView !== "video" &&
@@ -403,9 +409,11 @@ function AppInner() {
             <LoginView
               onSuccess={handleLoginSuccess}
               onSignupClick={() => handleNavChange("signup")}
-              onBack={() =>
-                setCurrentView(prevView === "login" ? "home" : prevView)
-              }
+              onBack={() => {
+                // Back from login always goes to a safe non-auth view
+                const dest = AUTH_VIEWS.includes(prevView) ? "home" : prevView;
+                setCurrentView(dest);
+              }}
             />
           )}
 
@@ -413,9 +421,10 @@ function AppInner() {
             <SignupView
               onSuccess={handleLoginSuccess}
               onLoginClick={() => handleNavChange("login")}
-              onBack={() =>
-                setCurrentView(prevView === "signup" ? "home" : prevView)
-              }
+              onBack={() => {
+                const dest = AUTH_VIEWS.includes(prevView) ? "home" : prevView;
+                setCurrentView(dest);
+              }}
             />
           )}
 

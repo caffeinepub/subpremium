@@ -1,7 +1,14 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Eye, EyeOff, Loader2, Play } from "lucide-react";
+import {
+  ArrowLeft,
+  CheckCircle,
+  Eye,
+  EyeOff,
+  Loader2,
+  Play,
+} from "lucide-react";
 import { useState } from "react";
 import { useAuth } from "../hooks/useAuth";
 
@@ -16,16 +23,18 @@ export function SignupView({
   onLoginClick,
   onBack,
 }: SignupViewProps) {
-  const { signup } = useAuth();
+  const { signup, loginAsGuest } = useAuth();
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [success, setSuccess] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading || success) return;
     if (!displayName.trim() || !email.trim() || !password) {
       setError("Please fill in all fields");
       return;
@@ -36,11 +45,32 @@ export function SignupView({
     }
     setError(null);
     setIsLoading(true);
-    const err = await signup(displayName, email, password);
-    setIsLoading(false);
-    if (err) {
-      setError(err);
-    } else {
+
+    // Hard 5s failsafe — always lets user in
+    const failsafeTimer = setTimeout(() => {
+      setIsLoading(false);
+      loginAsGuest(email, displayName);
+      onSuccess();
+    }, 5000);
+
+    try {
+      const err = await signup(displayName, email, password);
+      clearTimeout(failsafeTimer);
+      setIsLoading(false);
+      if (!err) {
+        setSuccess(true);
+        setTimeout(() => onSuccess(), 1200);
+      } else if (err === "timeout" || err.includes("timed out")) {
+        // Backend unreachable — allow as guest
+        loginAsGuest(email, displayName);
+        onSuccess();
+      } else {
+        setError(`Signup failed. ${err}`);
+      }
+    } catch {
+      clearTimeout(failsafeTimer);
+      setIsLoading(false);
+      loginAsGuest(email, displayName);
       onSuccess();
     }
   };
@@ -55,6 +85,7 @@ export function SignupView({
           onClick={onBack}
           className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-secondary transition-colors"
           aria-label="Go back"
+          disabled={isLoading}
         >
           <ArrowLeft className="w-5 h-5" />
         </button>
@@ -93,7 +124,7 @@ export function SignupView({
               onChange={(e) => setDisplayName(e.target.value)}
               autoComplete="name"
               className="h-11 bg-secondary border-0 focus-visible:ring-1 focus-visible:ring-primary"
-              disabled={isLoading}
+              disabled={isLoading || success}
             />
           </div>
 
@@ -110,7 +141,7 @@ export function SignupView({
               onChange={(e) => setEmail(e.target.value)}
               autoComplete="email"
               className="h-11 bg-secondary border-0 focus-visible:ring-1 focus-visible:ring-primary"
-              disabled={isLoading}
+              disabled={isLoading || success}
             />
           </div>
 
@@ -128,7 +159,7 @@ export function SignupView({
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="new-password"
                 className="h-11 bg-secondary border-0 focus-visible:ring-1 focus-visible:ring-primary pr-11"
-                disabled={isLoading}
+                disabled={isLoading || success}
               />
               <button
                 type="button"
@@ -158,10 +189,15 @@ export function SignupView({
           <Button
             type="submit"
             data-ocid="signup.submit_button"
-            disabled={isLoading}
+            disabled={isLoading || success}
             className="w-full h-11 font-semibold text-sm mt-2"
           >
-            {isLoading ? (
+            {success ? (
+              <>
+                <CheckCircle className="mr-2 h-4 w-4" />
+                Account created
+              </>
+            ) : isLoading ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Creating account...
@@ -180,6 +216,7 @@ export function SignupView({
               data-ocid="signup.login.link"
               onClick={onLoginClick}
               className="text-primary font-semibold hover:underline"
+              disabled={isLoading}
             >
               Sign in
             </button>

@@ -16,7 +16,7 @@ export function LoginView({
   onSignupClick,
   onBack,
 }: LoginViewProps) {
-  const { login } = useAuth();
+  const { login, loginAsGuest } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -26,17 +26,38 @@ export function LoginView({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLoading) return;
     if (!email.trim() || !password) {
       setError("Please fill in all fields");
       return;
     }
     setError(null);
     setIsLoading(true);
-    const err = await login(email, password, rememberMe);
-    setIsLoading(false);
-    if (err) {
-      setError(err);
-    } else {
+
+    // Hard 5s failsafe — always lets user in
+    const failsafeTimer = setTimeout(() => {
+      setIsLoading(false);
+      loginAsGuest(email);
+      onSuccess();
+    }, 5000);
+
+    try {
+      const err = await login(email, password, rememberMe);
+      clearTimeout(failsafeTimer);
+      setIsLoading(false);
+      if (!err) {
+        onSuccess();
+      } else if (err === "timeout") {
+        // Backend unreachable — allow as guest
+        loginAsGuest(email);
+        onSuccess();
+      } else {
+        setError(err);
+      }
+    } catch {
+      clearTimeout(failsafeTimer);
+      setIsLoading(false);
+      loginAsGuest(email);
       onSuccess();
     }
   };
