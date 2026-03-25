@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
 import { FileVideo, Pause, Play, Upload, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { VideoCard } from "../components/VideoCard";
@@ -14,7 +13,6 @@ interface HomeViewProps {
   searchQuery: string;
   onVideoClick: (video: Video) => void;
   onUploadClick: () => void;
-  isLoadingVideos?: boolean;
   onCreatorClick?: (creatorId: string, creatorName: string) => void;
 }
 
@@ -23,7 +21,6 @@ export function HomeView({
   searchQuery,
   onVideoClick,
   onUploadClick,
-  isLoadingVideos = false,
   onCreatorClick,
 }: HomeViewProps) {
   const { uploadTasks, cancelUpload, pauseUpload, resumeUpload } =
@@ -56,25 +53,6 @@ export function HomeView({
 
   const allEmpty = pendingVideos.length === 0 && filteredReady.length === 0;
 
-  // Show loading skeletons while fetching from backend
-  if (isLoadingVideos && allEmpty) {
-    return (
-      <div className="animate-fade-in">
-        <div className="px-3 pt-3 pb-4">
-          <div data-ocid="feed.loading_state" className="flex flex-col gap-4">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="flex flex-col gap-2">
-                <Skeleton className="w-full aspect-video rounded-xl" />
-                <Skeleton className="w-3/4 h-4 rounded" />
-                <Skeleton className="w-1/2 h-3 rounded" />
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="animate-fade-in">
       <div className="px-3 pt-3 pb-4">
@@ -93,7 +71,7 @@ export function HomeView({
               <p className="text-sm text-muted-foreground mt-1">
                 {searchQuery
                   ? "Try a different search term"
-                  : "Upload the first video to get started"}
+                  : "Be the first to upload"}
               </p>
             </div>
             {!searchQuery && (

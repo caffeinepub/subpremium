@@ -145,7 +145,6 @@ function AppInner() {
   const [prevView, setPrevView] = useState<ViewName>("home");
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [videos, setVideos] = useState<Video[]>(() => getVideos());
-  const [videosLoading, setVideosLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [profileCreatorId, setProfileCreatorId] = useState("");
   const [profileCreatorName, setProfileCreatorName] = useState("");
@@ -167,7 +166,7 @@ function AppInner() {
     applySettings(settings);
   }, [settings]);
 
-  // Fetch all videos from backend when actor is ready or user changes
+  // Fetch all videos from backend in background when actor is ready or user changes
   useEffect(() => {
     if (isFetching || authLoading || !actor) return;
 
@@ -175,7 +174,6 @@ function AppInner() {
     if (lastUserIdRef.current === user?.userId) return;
     lastUserIdRef.current = user?.userId ?? null;
 
-    setVideosLoading(true);
     (async () => {
       try {
         const backendVideos = await actor.getAllVideos();
@@ -186,8 +184,6 @@ function AppInner() {
       } catch (e) {
         console.error("[home] failed to fetch backend videos:", e);
         // Fallback: keep localStorage videos as-is
-      } finally {
-        setVideosLoading(false);
       }
     })();
   }, [actor, isFetching, authLoading, user?.userId]);
@@ -355,7 +351,6 @@ function AppInner() {
               searchQuery={searchQuery}
               onVideoClick={handleVideoClick}
               onUploadClick={() => handleNavChange("upload")}
-              isLoadingVideos={videosLoading}
               onCreatorClick={handleCreatorClick}
             />
           )}
