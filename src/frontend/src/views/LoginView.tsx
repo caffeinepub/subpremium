@@ -20,6 +20,7 @@ export function LoginView({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -31,7 +32,7 @@ export function LoginView({
     }
     setError(null);
     setIsLoading(true);
-    const err = await login(email, password);
+    const err = await login(email, password, rememberMe);
     setIsLoading(false);
     if (err) {
       setError(err);
@@ -121,6 +122,25 @@ export function LoginView({
                 )}
               </button>
             </div>
+          </div>
+
+          {/* Remember Me */}
+          <div className="flex items-center gap-2 mt-1">
+            <input
+              type="checkbox"
+              id="remember-me"
+              data-ocid="login.checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+              className="w-4 h-4 rounded accent-primary cursor-pointer"
+              disabled={isLoading}
+            />
+            <label
+              htmlFor="remember-me"
+              className="text-sm text-muted-foreground cursor-pointer select-none"
+            >
+              Remember me
+            </label>
           </div>
 
           {error && (

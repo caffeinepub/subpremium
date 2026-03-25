@@ -21,11 +21,16 @@ export interface AuthUser {
 interface AuthContextValue {
   user: AuthUser | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<string | null>;
+  login: (
+    email: string,
+    password: string,
+    rememberMe?: boolean,
+  ) => Promise<string | null>;
   signup: (
     displayName: string,
     email: string,
     password: string,
+    rememberMe?: boolean,
   ) => Promise<string | null>;
   logout: () => void;
   updateProfile: (
@@ -39,6 +44,7 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 const SESSION_KEY = "subpremium_session";
+const REMEMBER_KEY = "subpremium_remember";
 const PROFILE_KEY = "subpremium_profile";
 
 async function hashPassword(password: string): Promise<string> {
@@ -49,10 +55,9 @@ async function hashPassword(password: string): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// Session shape — no credentials stored
 interface Session {
   token: string;
-  // Stored so we can silently re-login after canister restarts / deploys
-  credentials?: { email: string; passwordHash: string };
   user: AuthUser;
 }
 
@@ -70,6 +75,7 @@ function saveSession(session: Session) {
 
 function clearSession() {
   localStorage.removeItem(SESSION_KEY);
+  localStorage.removeItem(REMEMBER_KEY);
 }
 
 function getProfileExtras(userId: string): {
@@ -91,31 +97,9 @@ function saveProfileExtras(
   localStorage.setItem(`${PROFILE_KEY}_${userId}`, JSON.stringify(extras));
 }
 
-/**
- * Attempt silent re-login using stored credentials.
- * Returns the new token on success, null on failure.
- */
-async function silentRelogin(credentials: {
-  email: string;
-  passwordHash: string;
-}): Promise<{ token: string; displayName: string; userId: string } | null> {
-  try {
-    const actor = await getBackendActor();
-    const result = await actor.loginUser(
-      credentials.email,
-      credentials.passwordHash,
-    );
-    if (result.__kind__ === "ok") return result.ok;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  // Used to prevent concurrent refresh attempts
   const refreshingRef = useRef(false);
 
   useEffect(() => {
@@ -135,34 +119,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         try {
           const result = await actor.validateSession(cached.token);
           if (result.__kind__ === "ok") {
-            // Token still valid — nothing to do
             setIsLoading(false);
             return;
           }
-
-          // Token invalid (canister restarted / deployed) — try silent re-login
-          if (cached.credentials) {
-            const fresh = await silentRelogin(cached.credentials);
-            if (fresh) {
-              const extras2 = getProfileExtras(fresh.userId);
-              const refreshedUser: AuthUser = {
-                userId: fresh.userId,
-                email: cached.credentials.email,
-                displayName: fresh.displayName,
-                ...extras2,
-              };
-              saveSession({
-                token: fresh.token,
-                credentials: cached.credentials,
-                user: refreshedUser,
-              });
-              setUser(refreshedUser);
-              setIsLoading(false);
-              return;
-            }
-          }
-
-          // Could not refresh — clear session
+          // Token invalid and no credentials stored — clear session
           clearSession();
           setUser(null);
         } catch {
@@ -177,7 +137,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(
-    async (email: string, password: string): Promise<string | null> => {
+    async (
+      email: string,
+      password: string,
+      rememberMe = false,
+    ): Promise<string | null> => {
       const normalizedEmail = email.trim().toLowerCase();
       const hash = await hashPassword(password);
       const actor = await getBackendActor();
@@ -193,11 +157,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         displayName,
         ...extras,
       };
-      saveSession({
-        token,
-        credentials: { email: normalizedEmail, passwordHash: hash },
-        user: authUser,
-      });
+      // Store session (token + user, never credentials)
+      saveSession({ token, user: authUser });
+      localStorage.setItem(REMEMBER_KEY, rememberMe ? "true" : "false");
       setUser(authUser);
       return null;
     },
@@ -209,6 +171,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       displayName: string,
       email: string,
       password: string,
+      rememberMe = true,
     ): Promise<string | null> => {
       const normalizedEmail = email.trim().toLowerCase();
       const hash = await hashPassword(password);
@@ -232,11 +195,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         email: normalizedEmail,
         displayName: displayName.trim(),
       };
-      saveSession({
-        token,
-        credentials: { email: normalizedEmail, passwordHash: hash },
-        user: authUser,
-      });
+      saveSession({ token, user: authUser });
+      localStorage.setItem(REMEMBER_KEY, rememberMe ? "true" : "false");
       setUser(authUser);
       return null;
     },
@@ -314,27 +274,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [user, checkUsername],
   );
 
-  // Periodic token refresh: re-validate and silently re-login every 30 min
+  // Periodic token validation every 30 minutes
   useEffect(() => {
     const interval = setInterval(
       async () => {
         if (refreshingRef.current) return;
         const session = getSession();
-        if (!session?.credentials || !user) return;
+        if (!session?.token || !user) return;
 
         refreshingRef.current = true;
         try {
           const actor = await getBackendActor();
           const result = await actor.validateSession(session.token);
           if (result.__kind__ === "err") {
-            // Silently re-login
-            const fresh = await silentRelogin(session.credentials);
-            if (fresh) {
-              saveSession({ ...session, token: fresh.token });
-            } else {
-              clearSession();
-              setUser(null);
-            }
+            // Token invalid and no credentials to refresh with — logout
+            clearSession();
+            setUser(null);
           }
         } catch {
           // Network issue — keep session as-is
@@ -343,7 +298,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       },
       30 * 60 * 1000,
-    ); // 30 minutes
+    );
 
     return () => clearInterval(interval);
   }, [user]);
