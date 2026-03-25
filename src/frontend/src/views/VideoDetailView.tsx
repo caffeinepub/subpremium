@@ -789,19 +789,17 @@ export function VideoDetailView({
 
         {/* CC + Settings overlay */}
         <div className="absolute top-2 right-2 z-10 flex items-center gap-1">
-          {hasCaptions && (
-            <button
-              type="button"
-              data-ocid="video.cc.button"
-              onClick={() => setShowCCMenu(true)}
-              aria-label="Closed captions"
-              className={`w-8 h-8 flex items-center justify-center rounded bg-black/60 hover:bg-black/80 transition-colors ${
-                selectedLang ? "text-primary" : "text-white"
-              }`}
-            >
-              <Captions className="w-4 h-4" aria-hidden="true" />
-            </button>
-          )}
+          <button
+            type="button"
+            data-ocid="video.cc.button"
+            onClick={() => setShowCCMenu(true)}
+            aria-label="Closed captions"
+            className={`w-8 h-8 flex items-center justify-center rounded bg-black/60 hover:bg-black/80 transition-colors ${
+              selectedLang ? "text-primary" : "text-white/70 hover:text-white"
+            }`}
+          >
+            <Captions className="w-4 h-4" aria-hidden="true" />
+          </button>
           <button
             type="button"
             data-ocid="video.settings.button"
@@ -924,53 +922,68 @@ export function VideoDetailView({
           className="rounded-t-2xl bg-background border-border px-0 pb-8"
         >
           <SheetHeader className="px-4 pb-2">
-            <SheetTitle className="text-base">Select Language</SheetTitle>
+            <SheetTitle className="text-base">Subtitles</SheetTitle>
           </SheetHeader>
           <div className="flex flex-col">
-            <CCLangOption
-              label="Off"
-              active={!selectedLang}
-              onClick={() => selectLang(null)}
-            />
-            {originalCaption && (
-              <CCLangOption
-                label={`${originalCaption.lang} (Original)`}
-                active={selectedLang === originalCaption.lang}
-                onClick={() => selectLang(originalCaption.lang)}
-              />
-            )}
-            {visibleCaptions
-              .filter((c) => c !== originalCaption)
-              .map((c) => (
+            {!hasCaptions ? (
+              <>
                 <CCLangOption
-                  key={c.lang}
-                  label={c.lang}
-                  active={selectedLang === c.lang}
-                  onClick={() => selectLang(c.lang)}
+                  label="Off"
+                  active={true}
+                  onClick={() => selectLang(null)}
                 />
-              ))}
-            {preferredLangs.length > 0 &&
-              !hasFilteredMatch &&
-              !showAllCaptions && (
-                <div className="px-4 py-3 text-sm text-muted-foreground">
-                  No subtitles in your language.
+                <p className="px-4 py-3 text-sm text-muted-foreground">
+                  No captions available for this video.
+                </p>
+              </>
+            ) : (
+              <>
+                <CCLangOption
+                  label="Off"
+                  active={!selectedLang}
+                  onClick={() => selectLang(null)}
+                />
+                {originalCaption && (
+                  <CCLangOption
+                    label={`${originalCaption.lang} (Original)`}
+                    active={selectedLang === originalCaption.lang}
+                    onClick={() => selectLang(originalCaption.lang)}
+                  />
+                )}
+                {visibleCaptions
+                  .filter((c) => c !== originalCaption)
+                  .map((c) => (
+                    <CCLangOption
+                      key={c.lang}
+                      label={c.lang}
+                      active={selectedLang === c.lang}
+                      onClick={() => selectLang(c.lang)}
+                    />
+                  ))}
+                {preferredLangs.length > 0 &&
+                  !hasFilteredMatch &&
+                  !showAllCaptions && (
+                    <div className="px-4 py-3 text-sm text-muted-foreground">
+                      No subtitles in your language.
+                      <button
+                        type="button"
+                        className="ml-2 text-primary underline text-sm"
+                        onClick={() => setShowAllCaptions(true)}
+                      >
+                        Show all
+                      </button>
+                    </div>
+                  )}
+                {preferredLangs.length > 0 && showAllCaptions && (
                   <button
                     type="button"
-                    className="ml-2 text-primary underline text-sm"
-                    onClick={() => setShowAllCaptions(true)}
+                    className="px-4 py-2 text-sm text-primary underline text-left"
+                    onClick={() => setShowAllCaptions(false)}
                   >
-                    Show all
+                    Show less
                   </button>
-                </div>
-              )}
-            {preferredLangs.length > 0 && showAllCaptions && (
-              <button
-                type="button"
-                className="px-4 py-2 text-sm text-primary underline text-left"
-                onClick={() => setShowAllCaptions(false)}
-              >
-                Show less
-              </button>
+                )}
+              </>
             )}
           </div>
         </SheetContent>
