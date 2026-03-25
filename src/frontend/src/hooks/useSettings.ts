@@ -22,6 +22,7 @@ export interface UserSettings {
   subtitleDefaultLanguage: string;
   darkMode: boolean;
   fontSize: "small" | "medium" | "large";
+  preferredLanguages: string[];
 }
 
 const DEFAULT_SETTINGS: UserSettings = {
@@ -37,6 +38,7 @@ const DEFAULT_SETTINGS: UserSettings = {
   subtitleDefaultLanguage: "none",
   darkMode: true,
   fontSize: "medium",
+  preferredLanguages: [],
 };
 
 interface SettingsContextValue {
