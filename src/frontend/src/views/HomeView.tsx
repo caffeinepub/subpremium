@@ -99,26 +99,18 @@ export function HomeView({
               const progress = task?.progress ?? 0;
               const stage = task?.stage ?? "uploading";
               const statusMsg = task?.statusMsg;
-              const isSlowNetwork = task?.isSlowNetwork ?? false;
               const isPaused = task?.isPaused ?? false;
 
               const isCancelled =
                 stage === "error" && statusMsg === "Upload cancelled";
-              const isWaiting =
-                !isPaused &&
-                (statusMsg?.includes("Waiting to reconnect") ||
-                  statusMsg?.includes("Connection lost") ||
-                  statusMsg?.includes("Reconnecting") ||
-                  statusMsg?.includes("Resuming"));
+              const isWaiting = false; // retries are silent
               const isProcessing = stage === "processing";
 
               const displayText = statusMsg
                 ? statusMsg
                 : isProcessing
                   ? "Processing..."
-                  : isSlowNetwork
-                    ? `Uploading... ${progress}% (slow network)`
-                    : `Uploading... ${progress}%`;
+                  : `Uploading... ${progress}%`;
 
               const badgeClass = isCancelled
                 ? "bg-red-500/90 text-white"

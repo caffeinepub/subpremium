@@ -214,9 +214,7 @@ export function UploadManagerProvider({
                   if (pct < 5) {
                     statusMsg = "Preparing...";
                   } else if (slow && elapsed > 60_000) {
-                    statusMsg = `Uploading... ${pct}% (this may take time)`;
-                  } else if (slow) {
-                    statusMsg = `Uploading... ${pct}% (slow network)`;
+                    statusMsg = "Uploading... this may take time";
                   } else {
                     statusMsg = `Uploading... ${pct}%`;
                   }
@@ -250,14 +248,9 @@ export function UploadManagerProvider({
                 err,
               );
 
-              const retryMsg =
-                attempt <= 3
-                  ? "Retrying..."
-                  : `Reconnecting... (attempt ${attempt})`;
-
+              // Retry silently — keep last known progress message visible
               updateTask(videoId, {
                 stage: "uploading",
-                statusMsg: retryMsg,
                 isSlowNetwork: false,
               });
 
@@ -364,7 +357,7 @@ export function UploadManagerProvider({
           networkPausedRef.current.add(videoId);
           updateTask(videoId, {
             stage: "uploading",
-            statusMsg: "Connection lost. Waiting to reconnect...",
+            statusMsg: "Uploading...",
             isSlowNetwork: false,
           });
         }
@@ -435,9 +428,7 @@ export function UploadManagerProvider({
             progress: savedPct,
             stage: "uploading",
             statusMsg:
-              savedPct > 0
-                ? `Resuming upload from ~${savedPct}%...`
-                : "Resuming upload...",
+              savedPct > 0 ? `Uploading... ${savedPct}%` : "Preparing...",
           });
           return next;
         });
@@ -462,7 +453,7 @@ export function UploadManagerProvider({
             networkPausedRef.current.add(id);
             next.set(id, {
               ...task,
-              statusMsg: "Connection lost. Waiting to reconnect...",
+              statusMsg: "Uploading...",
             });
           }
         }
@@ -486,7 +477,7 @@ export function UploadManagerProvider({
 
         updateTask(videoId, {
           stage: "uploading",
-          statusMsg: "Connection restored. Resuming...",
+          statusMsg: "Uploading...",
         });
 
         setTimeout(() => runUpload(videoId, params, video), 1500);
@@ -626,7 +617,7 @@ export function UploadManagerProvider({
       updateTask(videoId, {
         isPaused: false,
         stage: "uploading",
-        statusMsg: "Resuming...",
+        statusMsg: "Uploading...",
       });
     },
     [updateTask],
