@@ -152,6 +152,7 @@ export function VideoDetailView({
   const [qualityMode, setQualityMode] = useState<QualityMode>("auto");
   const [selectedQuality, setSelectedQuality] = useState<string>("Auto");
   const [showAdvancedQuality, setShowAdvancedQuality] = useState(false);
+  const [showAllCaptions, setShowAllCaptions] = useState(false);
   const [captionCues, setCaptionCues] = useState<CueLine[]>([]);
   const [currentCueText, setCurrentCueText] = useState<string | null>(null);
   const restoredTimeRef = useRef<number | null>(null);
@@ -303,6 +304,59 @@ export function VideoDetailView({
     loadCaption();
   }, [selectedLang, currentVideo.captions]);
 
+  // Auto-select subtitle on video load based on preferences
+  useEffect(() => {
+    const captions = currentVideo.captions ?? [];
+    if (captions.length === 0) {
+      setSelectedLang(null);
+      return;
+    }
+    const saved = userId
+      ? localStorage.getItem(
+          `subpremium_last_subtitle_${userId}_${currentVideo.id}`,
+        )
+      : null;
+    if (saved && captions.some((c) => c.lang === saved)) {
+      setSelectedLang(saved);
+      return;
+    }
+    const preferred = settings.preferredLanguages ?? [];
+    if (preferred.length > 0) {
+      const match = captions.find((c) =>
+        preferred.some(
+          (p) =>
+            c.lang.toLowerCase().includes(p.toLowerCase()) ||
+            p.toLowerCase().includes(c.lang.toLowerCase()),
+        ),
+      );
+      if (match) {
+        setSelectedLang(match.lang);
+        return;
+      }
+    }
+    if (
+      settings.subtitleDefaultLanguage &&
+      settings.subtitleDefaultLanguage !== "none"
+    ) {
+      const match = captions.find((c) =>
+        c.lang
+          .toLowerCase()
+          .includes(settings.subtitleDefaultLanguage!.toLowerCase()),
+      );
+      if (match) {
+        setSelectedLang(match.lang);
+        return;
+      }
+    }
+    setSelectedLang(null);
+  }, [
+    currentVideo.id,
+    currentVideo.captions,
+    userId,
+    settings.preferredLanguages,
+    settings.subtitleDefaultLanguage,
+  ]);
+
   // Update caption cue on timeupdate
   useEffect(() => {
     const el = videoRef.current;
@@ -383,13 +437,46 @@ export function VideoDetailView({
     }
   }, [nextVideo, onVideoSelect, cancelAutoplay]);
 
-  const selectLang = useCallback((lang: string | null) => {
-    setSelectedLang(lang);
-    setShowCCMenu(false);
-    setShowSettings(false);
-  }, []);
+  const selectLang = useCallback(
+    (lang: string | null) => {
+      setSelectedLang(lang);
+      setShowCCMenu(false);
+      setShowSettings(false);
+      if (userId && lang) {
+        localStorage.setItem(
+          `subpremium_last_subtitle_${userId}_${currentVideo.id}`,
+          lang,
+        );
+      } else if (userId) {
+        localStorage.removeItem(
+          `subpremium_last_subtitle_${userId}_${currentVideo.id}`,
+        );
+      }
+    },
+    [userId, currentVideo.id],
+  );
 
   const hasCaptions = currentVideo.captions && currentVideo.captions.length > 0;
+
+  // Filtered captions based on user preferred languages
+  const preferredLangs = settings.preferredLanguages ?? [];
+  const originalCaption = currentVideo.captions?.[0] ?? null;
+  const filteredCaptions =
+    preferredLangs.length === 0
+      ? (currentVideo.captions ?? [])
+      : (currentVideo.captions ?? []).filter(
+          (c) =>
+            c === originalCaption ||
+            preferredLangs.some(
+              (p) =>
+                c.lang.toLowerCase().includes(p.toLowerCase()) ||
+                p.toLowerCase().includes(c.lang.toLowerCase()),
+            ),
+        );
+  const hasFilteredMatch = filteredCaptions.length > 1;
+  const visibleCaptions = showAllCaptions
+    ? (currentVideo.captions ?? [])
+    : filteredCaptions;
   const hasSources = currentVideo.sources && currentVideo.sources.length > 0;
   const advancedSources =
     currentVideo.sources?.filter((s) => s.quality?.match(/\d+p/)) ?? [];
@@ -825,7 +912,13 @@ export function VideoDetailView({
       )}
 
       {/* CC Language Selector Sheet */}
-      <Sheet open={showCCMenu} onOpenChange={setShowCCMenu}>
+      <Sheet
+        open={showCCMenu}
+        onOpenChange={(open) => {
+          setShowCCMenu(open);
+          if (!open) setShowAllCaptions(false);
+        }}
+      >
         <SheetContent
           side="bottom"
           className="rounded-t-2xl bg-background border-border px-0 pb-8"
@@ -839,14 +932,46 @@ export function VideoDetailView({
               active={!selectedLang}
               onClick={() => selectLang(null)}
             />
-            {currentVideo.captions?.map((c) => (
+            {originalCaption && (
               <CCLangOption
-                key={c.lang}
-                label={c.lang}
-                active={selectedLang === c.lang}
-                onClick={() => selectLang(c.lang)}
+                label={`${originalCaption.lang} (Original)`}
+                active={selectedLang === originalCaption.lang}
+                onClick={() => selectLang(originalCaption.lang)}
               />
-            ))}
+            )}
+            {visibleCaptions
+              .filter((c) => c !== originalCaption)
+              .map((c) => (
+                <CCLangOption
+                  key={c.lang}
+                  label={c.lang}
+                  active={selectedLang === c.lang}
+                  onClick={() => selectLang(c.lang)}
+                />
+              ))}
+            {preferredLangs.length > 0 &&
+              !hasFilteredMatch &&
+              !showAllCaptions && (
+                <div className="px-4 py-3 text-sm text-muted-foreground">
+                  No subtitles in your language.
+                  <button
+                    type="button"
+                    className="ml-2 text-primary underline text-sm"
+                    onClick={() => setShowAllCaptions(true)}
+                  >
+                    Show all
+                  </button>
+                </div>
+              )}
+            {preferredLangs.length > 0 && showAllCaptions && (
+              <button
+                type="button"
+                className="px-4 py-2 text-sm text-primary underline text-left"
+                onClick={() => setShowAllCaptions(false)}
+              >
+                Show less
+              </button>
+            )}
           </div>
         </SheetContent>
       </Sheet>
@@ -998,14 +1123,37 @@ export function VideoDetailView({
                       active={!selectedLang}
                       onClick={() => selectLang(null)}
                     />
-                    {currentVideo.captions?.map((c) => (
+                    {originalCaption && (
                       <SettingsLangOption
-                        key={c.lang}
-                        label={c.lang}
-                        active={selectedLang === c.lang}
-                        onClick={() => selectLang(c.lang)}
+                        label={`${originalCaption.lang} (Original)`}
+                        active={selectedLang === originalCaption.lang}
+                        onClick={() => selectLang(originalCaption.lang)}
                       />
-                    ))}
+                    )}
+                    {visibleCaptions
+                      .filter((c) => c !== originalCaption)
+                      .map((c) => (
+                        <SettingsLangOption
+                          key={c.lang}
+                          label={c.lang}
+                          active={selectedLang === c.lang}
+                          onClick={() => selectLang(c.lang)}
+                        />
+                      ))}
+                    {preferredLangs.length > 0 &&
+                      !hasFilteredMatch &&
+                      !showAllCaptions && (
+                        <div className="px-3 py-2 text-sm text-muted-foreground">
+                          No subtitles in your language.
+                          <button
+                            type="button"
+                            className="ml-2 text-primary underline text-sm"
+                            onClick={() => setShowAllCaptions(true)}
+                          >
+                            Show all
+                          </button>
+                        </div>
+                      )}
                   </div>
                 </div>
               </>
@@ -1148,7 +1296,7 @@ export function VideoDetailView({
           </h2>
           {hasCaptions ? (
             <div className="flex flex-wrap gap-2">
-              {currentVideo.captions?.map((c) => (
+              {visibleCaptions.map((c) => (
                 <button
                   key={c.lang}
                   type="button"
