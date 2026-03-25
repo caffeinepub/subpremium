@@ -122,6 +122,22 @@ actor {
     playlists : [PlaylistRecord];
   };
 
+  type UserSettings = {
+    accountPublic : Bool;
+    allowComments : Bool;
+    allowDownloads : Bool;
+    autoplayVideos : Bool;
+    videoQuality : Text;
+    videoQualityWifi : Text;
+    videoQualityMobile : Text;
+    subtitlesLanguage : Text;
+    subtitleDefaultLanguage : Text;
+    appLanguage : Text;
+    darkMode : Bool;
+    fontSize : Text;
+    preferredLanguages : [Text];
+  };
+
   // --- Stable state ---
 
   let usersByEmail = Map.empty<Text, UserRecord>();
@@ -142,6 +158,7 @@ actor {
   // User data maps
   let userDataMap = Map.empty<Text, UserData>();
   let watchProgressMap = Map.empty<Text, WatchProgressEntry>();
+  let userSettingsMap = Map.empty<Text, UserSettings>();
 
   func makeToken() : Text {
     tokenCounter += 1;
@@ -460,4 +477,21 @@ actor {
   public query func searchVideos(searchTerm : Text) : async [VideoRecord] {
     videos.values().filter(func(video) { video.title.contains(#text searchTerm) }).toArray();
   };
+
+  // --- User settings persistence ---
+
+  public shared func saveUserSettings(token : Text, settings : UserSettings) : async Bool {
+    switch (validateToken(token)) {
+      case null { false };
+      case (?userId) {
+        userSettingsMap.add(userId, settings);
+        true
+      };
+    }
+  };
+
+  public query func getUserSettings(userId : Text) : async ?UserSettings {
+    userSettingsMap.get(userId)
+  };
+
 };
