@@ -1,10 +1,18 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { HttpAgent } from "@icp-sdk/core/agent";
 import {
   ArrowLeft,
   Captions,
+  Check,
+  ChevronRight,
   Download,
   MessageCircle,
   Send,
@@ -16,7 +24,9 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 import { loadConfig } from "../config";
 import { useActor } from "../hooks/useActor";
+import { useAuth } from "../hooks/useAuth";
 import { useInternetIdentity } from "../hooks/useInternetIdentity";
+import { addNotification } from "../hooks/useNotifications";
 import type { Comment, Video } from "../types/video";
 import { StorageClient } from "../utils/StorageClient";
 import { formatTimeAgo, formatViewsShort } from "../utils/format";
@@ -30,16 +40,84 @@ interface VideoDetailViewProps {
   video: Video;
   onBack: () => void;
   onVideoUpdate: (video: Video) => void;
+  onLoginClick: () => void;
+  allVideos?: Video[];
+  onVideoSelect?: (video: Video) => void;
 }
+
+type CueLine = { start: number; end: number; text: string };
+type QualityMode = "auto" | "higher" | "datasaver" | "advanced";
+
+function parseSRT(text: string): CueLine[] {
+  const blocks = text.trim().split(/\n\n+/);
+  return blocks.flatMap((block) => {
+    const lines = block.trim().split("\n");
+    if (lines.length < 3) return [];
+    const timeLine = lines[1];
+    const match = timeLine.match(
+      /(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/,
+    );
+    if (!match) return [];
+    const toSec = (h: string, m: string, s: string, ms: string) =>
+      +h * 3600 + +m * 60 + +s + +ms / 1000;
+    return [
+      {
+        start: toSec(match[1], match[2], match[3], match[4]),
+        end: toSec(match[5], match[6], match[7], match[8]),
+        text: lines
+          .slice(2)
+          .join("\n")
+          .replace(/<[^>]+>/g, ""),
+      },
+    ];
+  });
+}
+
+function parseVTT(text: string): CueLine[] {
+  const lines = text.split("\n");
+  const cues: CueLine[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i].trim();
+    const match = line.match(
+      /(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+)[,.](\d+)/,
+    );
+    if (match) {
+      const toSec = (m: string, s: string, ms: string) =>
+        +m * 60 + +s + +ms / 1000;
+      const start = toSec(match[1], match[2], match[3]);
+      const end = toSec(match[4], match[5], match[6]);
+      const textLines: string[] = [];
+      i++;
+      while (i < lines.length && lines[i].trim() !== "") {
+        textLines.push(lines[i].trim().replace(/<[^>]+>/g, ""));
+        i++;
+      }
+      cues.push({ start, end, text: textLines.join("\n") });
+    } else {
+      i++;
+    }
+  }
+  return cues;
+}
+
+const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 export function VideoDetailView({
   video,
   onBack,
   onVideoUpdate,
+  onLoginClick,
+  allVideos = [],
+  onVideoSelect,
 }: VideoDetailViewProps) {
-  const { identity, loginStatus } = useInternetIdentity();
+  const { user } = useAuth();
+  const isLoggedIn = !!user;
+  const userId = user?.userId ?? "";
+
+  const { identity } = useInternetIdentity();
   const { isFetching } = useActor();
-  const isLoggedIn = loginStatus === "success" && !!identity;
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [loadingVideo, setLoadingVideo] = useState(true);
@@ -47,8 +125,36 @@ export function VideoDetailView({
   const [commentText, setCommentText] = useState("");
   const [currentVideo, setCurrentVideo] = useState<Video>(video);
   const [showDescription, setShowDescription] = useState(false);
-  const userPrincipal = identity?.getPrincipal().toString() ?? "";
+  const [subscribed, setSubscribed] = useState(() => {
+    return localStorage.getItem(`subpremium_subs_${video.creatorId}`) === "1";
+  });
   const mountedRef = useRef(false);
+
+  // CC + Settings state
+  const [selectedLang, setSelectedLang] = useState<string | null>(null);
+  const [showCCMenu, setShowCCMenu] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [qualityMode, setQualityMode] = useState<QualityMode>("auto");
+  const [selectedQuality, setSelectedQuality] = useState<string>("Auto");
+  const [showAdvancedQuality, setShowAdvancedQuality] = useState(false);
+  const [captionCues, setCaptionCues] = useState<CueLine[]>([]);
+  const [currentCueText, setCurrentCueText] = useState<string | null>(null);
+  const restoredTimeRef = useRef<number | null>(null);
+
+  // Autoplay state
+  const [autoplayCountdown, setAutoplayCountdown] = useState<number | null>(
+    null,
+  );
+  const autoplayCancelledRef = useRef(false);
+  const autoplayTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Suggestions: other ready videos excluding current
+  const suggestions = allVideos
+    .filter((v) => v.id !== currentVideo.id && v.status === "ready")
+    .slice(0, 10);
+
+  const nextVideo = suggestions[0] ?? null;
 
   // Load video URL
   useEffect(() => {
@@ -103,49 +209,225 @@ export function VideoDetailView({
     onVideoUpdate(updated);
   }, [video, onVideoUpdate]);
 
+  // Apply playback rate
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = playbackRate;
+    }
+  }, [playbackRate]);
+
+  // Load captions when language changes
+  useEffect(() => {
+    if (!selectedLang || selectedLang === "Off") {
+      setCaptionCues([]);
+      setCurrentCueText(null);
+      return;
+    }
+
+    const caption = currentVideo.captions?.find((c) => c.lang === selectedLang);
+    if (!caption) return;
+
+    async function loadCaption() {
+      if (!caption) return;
+      try {
+        let text = "";
+        if (caption.url.startsWith("local:")) {
+          const parts = caption.url.split(":");
+          const langKey = parts.slice(2).join(":");
+          const videoId = parts[1];
+          text =
+            localStorage.getItem(`caption_content_${videoId}_${langKey}`) ?? "";
+        } else {
+          const res = await fetch(caption.url);
+          text = await res.text();
+        }
+
+        if (!text) return;
+
+        const cues =
+          caption.url.includes(".srt") || caption.url.includes("srt")
+            ? parseSRT(text)
+            : parseVTT(text);
+        setCaptionCues(cues);
+      } catch (e) {
+        console.error("Failed to load caption:", e);
+      }
+    }
+
+    loadCaption();
+  }, [selectedLang, currentVideo.captions]);
+
+  // Update caption cue on timeupdate
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    function onTimeUpdate() {
+      const t = el!.currentTime;
+      const cue = captionCues.find((c) => t >= c.start && t <= c.end);
+      setCurrentCueText(cue ? cue.text : null);
+    }
+    el.addEventListener("timeupdate", onTimeUpdate);
+    return () => el.removeEventListener("timeupdate", onTimeUpdate);
+  }, [captionCues]);
+
+  // Autoplay: start countdown when video ends
+  const handleVideoEnded = useCallback(() => {
+    if (!nextVideo || !onVideoSelect) return;
+    autoplayCancelledRef.current = false;
+    setAutoplayCountdown(5);
+  }, [nextVideo, onVideoSelect]);
+
+  // Countdown tick
+  useEffect(() => {
+    if (autoplayCountdown === null) return;
+    if (autoplayCountdown === 0) {
+      // play next
+      if (!autoplayCancelledRef.current && nextVideo && onVideoSelect) {
+        onVideoSelect(nextVideo);
+      }
+      setAutoplayCountdown(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (!autoplayCancelledRef.current) {
+        setAutoplayCountdown((c) => (c !== null ? c - 1 : null));
+      }
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [autoplayCountdown, nextVideo, onVideoSelect]);
+
+  const cancelAutoplay = useCallback(() => {
+    autoplayCancelledRef.current = true;
+    setAutoplayCountdown(null);
+    if (autoplayTimerRef.current) clearInterval(autoplayTimerRef.current);
+  }, []);
+
+  const selectLang = useCallback((lang: string | null) => {
+    setSelectedLang(lang);
+    setShowCCMenu(false);
+    setShowSettings(false);
+  }, []);
+
+  const hasCaptions = currentVideo.captions && currentVideo.captions.length > 0;
+  const hasSources = currentVideo.sources && currentVideo.sources.length > 0;
+  const advancedSources =
+    currentVideo.sources?.filter((s) => s.quality?.match(/\d+p/)) ?? [];
+
+  const applyQualityMode = useCallback(
+    async (mode: QualityMode, quality?: string) => {
+      setQualityMode(mode);
+      if (mode === "advanced" && quality) setSelectedQuality(quality);
+      setShowSettings(false);
+      setShowAdvancedQuality(false);
+    },
+    [],
+  );
+
+  // Re-load URL when quality changes
+  useEffect(() => {
+    if (!hasSources) return;
+    let cancelled = false;
+    async function reload() {
+      try {
+        const config = await loadConfig();
+        const agentOptions: Record<string, unknown> = {
+          host: config.backend_host,
+        };
+        if (identity) agentOptions.identity = identity;
+        const agent = new HttpAgent(agentOptions as any);
+        if (config.backend_host?.includes("localhost")) {
+          await agent.fetchRootKey().catch(console.error);
+        }
+        const sc = new StorageClient(
+          config.bucket_name,
+          config.storage_gateway_url,
+          config.backend_canister_id,
+          config.project_id,
+          agent,
+        );
+        const url = await sc.getDirectURL(currentVideo.blobHash);
+        if (!cancelled) {
+          setVideoUrl(url);
+          setLoadingVideo(false);
+        }
+      } catch {
+        if (!cancelled) {
+          setVideoError(true);
+          setLoadingVideo(false);
+        }
+      }
+    }
+    reload();
+    return () => {
+      cancelled = true;
+    };
+  }, [hasSources, currentVideo.blobHash, identity]);
+
+  const handleSubscribe = useCallback(() => {
+    const next = !subscribed;
+    setSubscribed(next);
+    if (next) {
+      localStorage.setItem(`subpremium_subs_${currentVideo.creatorId}`, "1");
+    } else {
+      localStorage.removeItem(`subpremium_subs_${currentVideo.creatorId}`);
+    }
+  }, [subscribed, currentVideo.creatorId]);
+
   const handleLike = useCallback(() => {
-    if (!isLoggedIn) return;
+    if (!isLoggedIn || !userId) return;
     const likedBy = currentVideo.likedBy ?? [];
     const dislikedBy = currentVideo.dislikedBy ?? [];
-    const hasLiked = likedBy.includes(userPrincipal);
+    const hasLiked = likedBy.includes(userId);
     const updated: Video = {
       ...currentVideo,
       likedBy: hasLiked
-        ? likedBy.filter((p) => p !== userPrincipal)
-        : [...likedBy, userPrincipal],
-      dislikedBy: dislikedBy.filter((p) => p !== userPrincipal),
+        ? likedBy.filter((p) => p !== userId)
+        : [...likedBy, userId],
+      dislikedBy: dislikedBy.filter((p) => p !== userId),
       likes: hasLiked ? currentVideo.likes - 1 : currentVideo.likes + 1,
-      dislikes: dislikedBy.includes(userPrincipal)
+      dislikes: dislikedBy.includes(userId)
         ? currentVideo.dislikes - 1
         : currentVideo.dislikes,
     };
     setCurrentVideo(updated);
     updateVideo(updated);
     onVideoUpdate(updated);
-  }, [currentVideo, isLoggedIn, userPrincipal, onVideoUpdate]);
+    if (
+      !hasLiked &&
+      userId !== currentVideo.creatorId &&
+      currentVideo.creatorId
+    ) {
+      addNotification(currentVideo.creatorId, {
+        type: "like",
+        title: "New like",
+        message: `${user?.displayName || user?.email || "Someone"} liked your video: "${currentVideo.title}"`,
+        videoId: currentVideo.id,
+      });
+    }
+  }, [currentVideo, isLoggedIn, userId, user, onVideoUpdate]);
 
   const handleDislike = useCallback(() => {
-    if (!isLoggedIn) return;
+    if (!isLoggedIn || !userId) return;
     const likedBy = currentVideo.likedBy ?? [];
     const dislikedBy = currentVideo.dislikedBy ?? [];
-    const hasDisliked = dislikedBy.includes(userPrincipal);
+    const hasDisliked = dislikedBy.includes(userId);
     const updated: Video = {
       ...currentVideo,
       dislikedBy: hasDisliked
-        ? dislikedBy.filter((p) => p !== userPrincipal)
-        : [...dislikedBy, userPrincipal],
-      likedBy: likedBy.filter((p) => p !== userPrincipal),
+        ? dislikedBy.filter((p) => p !== userId)
+        : [...dislikedBy, userId],
+      likedBy: likedBy.filter((p) => p !== userId),
       dislikes: hasDisliked
         ? currentVideo.dislikes - 1
         : currentVideo.dislikes + 1,
-      likes: likedBy.includes(userPrincipal)
+      likes: likedBy.includes(userId)
         ? currentVideo.likes - 1
         : currentVideo.likes,
     };
     setCurrentVideo(updated);
     updateVideo(updated);
     onVideoUpdate(updated);
-  }, [currentVideo, isLoggedIn, userPrincipal, onVideoUpdate]);
+  }, [currentVideo, isLoggedIn, userId, onVideoUpdate]);
 
   const handleShare = useCallback(() => {
     const url = `${window.location.origin}?v=${currentVideo.id}`;
@@ -157,12 +439,12 @@ export function VideoDetailView({
   }, [currentVideo]);
 
   const handleComment = useCallback(() => {
-    if (!commentText.trim() || !isLoggedIn) return;
+    if (!commentText.trim() || !isLoggedIn || !user) return;
     const comment: Comment = {
       id: crypto.randomUUID(),
       text: commentText.trim(),
-      authorName: `${identity!.getPrincipal().toString().slice(0, 10)}...`,
-      authorId: identity!.getPrincipal().toString(),
+      authorName: user.displayName || user.email,
+      authorId: user.userId,
       createdAt: Date.now(),
     };
     const updated: Video = {
@@ -173,15 +455,31 @@ export function VideoDetailView({
     updateVideo(updated);
     onVideoUpdate(updated);
     setCommentText("");
-  }, [commentText, isLoggedIn, identity, currentVideo, onVideoUpdate]);
+    if (
+      user &&
+      user.userId !== currentVideo.creatorId &&
+      currentVideo.creatorId
+    ) {
+      addNotification(currentVideo.creatorId, {
+        type: "comment",
+        title: "New comment",
+        message: `${user.displayName || user.email || "Someone"} commented on your video: "${currentVideo.title}"`,
+        videoId: currentVideo.id,
+      });
+    }
+  }, [commentText, isLoggedIn, user, currentVideo, onVideoUpdate]);
 
-  const hasLiked = (currentVideo.likedBy ?? []).includes(userPrincipal);
-  const hasDisliked = (currentVideo.dislikedBy ?? []).includes(userPrincipal);
+  const hasLiked = (currentVideo.likedBy ?? []).includes(userId);
+  const hasDisliked = (currentVideo.dislikedBy ?? []).includes(userId);
+
+  const userInitials = user
+    ? (user.displayName || user.email).slice(0, 2).toUpperCase()
+    : "?";
 
   return (
     <div className="animate-fade-in pb-20">
       {/* Top bar */}
-      <div className="flex items-center justify-between px-3 py-2">
+      <div className="flex items-center px-3 py-2">
         <button
           type="button"
           data-ocid="video.back.button"
@@ -191,30 +489,6 @@ export function VideoDetailView({
         >
           <ArrowLeft className="w-5 h-5" aria-hidden="true" />
         </button>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            data-ocid="video.settings.button"
-            className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-secondary transition-colors"
-            aria-label="Video settings"
-          >
-            <Settings
-              className="w-5 h-5 text-muted-foreground"
-              aria-hidden="true"
-            />
-          </button>
-          <button
-            type="button"
-            data-ocid="video.cc.button"
-            className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-secondary transition-colors"
-            aria-label="Closed captions"
-          >
-            <Captions
-              className="w-5 h-5 text-muted-foreground"
-              aria-hidden="true"
-            />
-          </button>
-        </div>
       </div>
 
       {/* Video player */}
@@ -253,7 +527,7 @@ export function VideoDetailView({
           </div>
         )}
         {videoUrl && !videoError && (
-          // biome-ignore lint/a11y/useMediaCaption: captions not available for user-uploaded content
+          // biome-ignore lint/a11y/useMediaCaption: captions handled via custom overlay
           <video
             data-ocid="video.canvas_target"
             ref={videoRef}
@@ -261,14 +535,310 @@ export function VideoDetailView({
             controls
             playsInline
             className="w-full h-full"
-            onLoadedData={() => setLoadingVideo(false)}
+            onLoadedData={() => {
+              setLoadingVideo(false);
+              if (restoredTimeRef.current !== null && videoRef.current) {
+                videoRef.current.currentTime = restoredTimeRef.current;
+                restoredTimeRef.current = null;
+              }
+              if (videoRef.current) {
+                videoRef.current.playbackRate = playbackRate;
+              }
+            }}
             onError={() => {
               setVideoError(true);
               setLoadingVideo(false);
             }}
+            onEnded={handleVideoEnded}
           />
         )}
+
+        {/* CC + Settings overlay */}
+        <div className="absolute top-2 right-2 z-10 flex items-center gap-1">
+          {hasCaptions && (
+            <button
+              type="button"
+              data-ocid="video.cc.button"
+              onClick={() => setShowCCMenu(true)}
+              aria-label="Closed captions"
+              className={`w-8 h-8 flex items-center justify-center rounded bg-black/60 hover:bg-black/80 transition-colors ${
+                selectedLang ? "text-primary" : "text-white"
+              }`}
+            >
+              <Captions className="w-4 h-4" aria-hidden="true" />
+            </button>
+          )}
+          <button
+            type="button"
+            data-ocid="video.settings.button"
+            onClick={() => setShowSettings(true)}
+            aria-label="Video settings"
+            className="w-8 h-8 flex items-center justify-center rounded bg-black/60 hover:bg-black/80 transition-colors text-white"
+          >
+            <Settings className="w-4 h-4" aria-hidden="true" />
+          </button>
+        </div>
+
+        {/* Caption overlay */}
+        {currentCueText && (
+          <div className="absolute bottom-8 left-0 right-0 flex justify-center px-4 pointer-events-none z-10">
+            <div className="bg-black/75 text-white text-sm px-3 py-1 rounded text-center max-w-[90%] leading-relaxed whitespace-pre-line">
+              {currentCueText}
+            </div>
+          </div>
+        )}
+
+        {/* Autoplay overlay */}
+        {autoplayCountdown !== null && nextVideo && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80">
+            <div className="flex flex-col items-center gap-4 text-white text-center px-6">
+              {/* Countdown ring */}
+              <div className="relative w-16 h-16">
+                <svg
+                  className="w-16 h-16 -rotate-90"
+                  viewBox="0 0 64 64"
+                  role="img"
+                  aria-label="Autoplay countdown"
+                >
+                  <circle
+                    cx="32"
+                    cy="32"
+                    r="28"
+                    fill="none"
+                    stroke="rgba(255,255,255,0.2)"
+                    strokeWidth="4"
+                  />
+                  <circle
+                    cx="32"
+                    cy="32"
+                    r="28"
+                    fill="none"
+                    stroke="white"
+                    strokeWidth="4"
+                    strokeDasharray={`${2 * Math.PI * 28}`}
+                    strokeDashoffset={`${2 * Math.PI * 28 * (1 - autoplayCountdown / 5)}`}
+                    strokeLinecap="round"
+                    style={{ transition: "stroke-dashoffset 0.9s linear" }}
+                  />
+                </svg>
+                <span className="absolute inset-0 flex items-center justify-center text-2xl font-bold">
+                  {autoplayCountdown}
+                </span>
+              </div>
+              <p className="text-base font-semibold">
+                Next video in {autoplayCountdown}s
+              </p>
+              {nextVideo.thumbnailDataUrl && (
+                <img
+                  src={nextVideo.thumbnailDataUrl}
+                  alt={nextVideo.title}
+                  className="w-40 h-24 object-cover rounded-lg opacity-80"
+                />
+              )}
+              <p className="text-sm text-white/70 max-w-[200px] line-clamp-2">
+                {nextVideo.title}
+              </p>
+              <button
+                type="button"
+                onClick={cancelAutoplay}
+                className="mt-2 px-6 py-2 rounded-full border border-white/50 text-sm font-medium hover:bg-white/10 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* CC Language Selector Sheet */}
+      <Sheet open={showCCMenu} onOpenChange={setShowCCMenu}>
+        <SheetContent
+          side="bottom"
+          className="rounded-t-2xl bg-background border-border px-0 pb-8"
+        >
+          <SheetHeader className="px-4 pb-2">
+            <SheetTitle className="text-base">Select Language</SheetTitle>
+          </SheetHeader>
+          <div className="flex flex-col">
+            <CCLangOption
+              label="Off"
+              active={!selectedLang}
+              onClick={() => selectLang(null)}
+            />
+            {currentVideo.captions?.map((c) => (
+              <CCLangOption
+                key={c.lang}
+                label={c.lang}
+                active={selectedLang === c.lang}
+                onClick={() => selectLang(c.lang)}
+              />
+            ))}
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      {/* Settings Sheet */}
+      <Sheet open={showSettings} onOpenChange={setShowSettings}>
+        <SheetContent
+          side="bottom"
+          className="rounded-t-2xl bg-background border-border px-0 pb-8"
+        >
+          <SheetHeader className="px-4 pb-2">
+            <SheetTitle className="text-base">Settings</SheetTitle>
+          </SheetHeader>
+
+          <div className="flex flex-col gap-0">
+            {/* Playback Speed */}
+            <div className="px-4 py-3">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                Playback Speed
+              </p>
+              <div className="flex gap-2 flex-wrap">
+                {SPEEDS.map((rate) => (
+                  <button
+                    key={rate}
+                    type="button"
+                    onClick={() => {
+                      setPlaybackRate(rate);
+                      if (videoRef.current)
+                        videoRef.current.playbackRate = rate;
+                    }}
+                    className={`px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                      playbackRate === rate
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-secondary text-foreground hover:bg-secondary/80"
+                    }`}
+                  >
+                    {rate === 1 ? "1x (Default)" : `${rate}x`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Quality */}
+            {hasSources && (
+              <>
+                <Separator className="bg-border" />
+                <div className="px-4 py-3">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    Video Quality
+                  </p>
+                  <div className="flex flex-col gap-0">
+                    <QualityRow
+                      label="Auto (recommended)"
+                      description="Adjusts based on your network"
+                      active={qualityMode === "auto"}
+                      onClick={() => applyQualityMode("auto")}
+                    />
+                    <QualityRow
+                      label="Higher quality"
+                      description="Best resolution, uses more data"
+                      active={qualityMode === "higher"}
+                      onClick={() => applyQualityMode("higher")}
+                    />
+                    <QualityRow
+                      label="Data saver"
+                      description="Lower resolution, saves data"
+                      active={qualityMode === "datasaver"}
+                      onClick={() => applyQualityMode("datasaver")}
+                    />
+                    {advancedSources.length > 0 && (
+                      <>
+                        <button
+                          type="button"
+                          data-ocid="video.quality.advanced.toggle"
+                          onClick={() => {
+                            setShowAdvancedQuality((p) => !p);
+                            if (qualityMode !== "advanced")
+                              setQualityMode("advanced");
+                          }}
+                          className={`w-full py-2.5 text-left flex items-center justify-between transition-colors hover:text-primary ${
+                            qualityMode === "advanced"
+                              ? "text-primary"
+                              : "text-foreground"
+                          }`}
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium">
+                              Advanced
+                            </span>
+                            <span className="text-xs text-muted-foreground">
+                              Choose exact resolution
+                            </span>
+                          </div>
+                          <ChevronRight
+                            className={`w-4 h-4 transition-transform ${
+                              showAdvancedQuality ? "rotate-90" : ""
+                            }`}
+                            aria-hidden="true"
+                          />
+                        </button>
+
+                        {showAdvancedQuality && (
+                          <div className="pl-4 flex flex-col gap-0 border-l-2 border-border ml-1">
+                            {advancedSources.map((src) => (
+                              <button
+                                key={src.quality}
+                                type="button"
+                                data-ocid={`video.quality.${src.quality}.button`}
+                                onClick={() =>
+                                  applyQualityMode("advanced", src.quality)
+                                }
+                                className={`w-full py-2 text-left text-sm flex items-center justify-between transition-colors hover:text-primary ${
+                                  qualityMode === "advanced" &&
+                                  selectedQuality === src.quality
+                                    ? "text-primary font-semibold"
+                                    : "text-muted-foreground"
+                                }`}
+                              >
+                                {src.quality}
+                                {qualityMode === "advanced" &&
+                                  selectedQuality === src.quality && (
+                                    <Check
+                                      className="w-3.5 h-3.5"
+                                      aria-hidden="true"
+                                    />
+                                  )}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Captions */}
+            {hasCaptions && (
+              <>
+                <Separator className="bg-border" />
+                <div className="px-4 py-3">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                    Captions
+                  </p>
+                  <div className="flex flex-col gap-0">
+                    <SettingsLangOption
+                      label="Off"
+                      active={!selectedLang}
+                      onClick={() => selectLang(null)}
+                    />
+                    {currentVideo.captions?.map((c) => (
+                      <SettingsLangOption
+                        key={c.lang}
+                        label={c.lang}
+                        active={selectedLang === c.lang}
+                        onClick={() => selectLang(c.lang)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </SheetContent>
+      </Sheet>
 
       <div className="px-3 pt-3">
         {/* Title + metadata */}
@@ -276,10 +846,31 @@ export function VideoDetailView({
           {currentVideo.title}
         </h1>
         <p className="text-xs text-muted-foreground mt-1">
-          {currentVideo.creatorName} &middot;{" "}
           {formatViewsShort(currentVideo.views)} views &middot;{" "}
           {formatTimeAgo(currentVideo.createdAt)}
         </p>
+
+        {/* Channel row */}
+        <div className="flex items-center gap-3 mt-3">
+          <div className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center shrink-0">
+            <span className="text-xs font-bold">
+              {currentVideo.creatorName.slice(0, 2).toUpperCase()}
+            </span>
+          </div>
+          <span className="text-sm font-semibold flex-1 truncate">
+            {currentVideo.creatorName}
+          </span>
+          <Button
+            data-ocid="video.subscribe.button"
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={handleSubscribe}
+            className={subscribed ? "text-muted-foreground border-muted" : ""}
+          >
+            {subscribed ? "Subscribed" : "Subscribe"}
+          </Button>
+        </div>
 
         {/* Actions row */}
         <div className="flex items-center justify-between mt-4 py-1">
@@ -361,15 +952,85 @@ export function VideoDetailView({
 
         <Separator className="my-3 bg-border" />
 
-        {/* Captions */}
+        {/* Captions info */}
         <section data-ocid="video.captions.section">
           <h2 className="text-sm font-semibold text-foreground mb-1">
             Captions
           </h2>
-          <p className="text-sm text-muted-foreground">No captions available</p>
+          {hasCaptions ? (
+            <div className="flex flex-wrap gap-2">
+              {currentVideo.captions?.map((c) => (
+                <button
+                  key={c.lang}
+                  type="button"
+                  onClick={() => setSelectedLang(c.lang)}
+                  className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                    selectedLang === c.lang
+                      ? "bg-primary text-primary-foreground border-primary"
+                      : "border-border text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {c.lang}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No captions available
+            </p>
+          )}
         </section>
 
         <Separator className="my-3 bg-border" />
+
+        {/* Suggested Videos */}
+        {suggestions.length > 0 && (
+          <section data-ocid="video.suggestions.section">
+            <h2 className="text-sm font-semibold text-foreground mb-3">
+              Up Next
+            </h2>
+            <div className="flex flex-col gap-3">
+              {suggestions.map((v) => (
+                <button
+                  key={v.id}
+                  type="button"
+                  onClick={() => onVideoSelect?.(v)}
+                  className="flex gap-3 items-start text-left hover:bg-secondary/50 rounded-lg p-1.5 -mx-1.5 transition-colors w-full"
+                >
+                  {/* Thumbnail */}
+                  <div className="w-28 h-16 rounded-lg bg-secondary shrink-0 overflow-hidden">
+                    {v.thumbnailDataUrl ? (
+                      <img
+                        src={v.thumbnailDataUrl}
+                        alt={v.title}
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <span className="text-[10px] text-muted-foreground">
+                          No thumb
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  {/* Info */}
+                  <div className="flex-1 min-w-0 pt-0.5">
+                    <p className="text-sm font-medium text-foreground line-clamp-2 leading-snug">
+                      {v.title}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {v.creatorName}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {formatViewsShort(v.views)} views
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+            <Separator className="my-3 bg-border" />
+          </section>
+        )}
 
         {/* Comments */}
         <section data-ocid="video.comments.section">
@@ -381,13 +1042,7 @@ export function VideoDetailView({
           {isLoggedIn ? (
             <div className="flex items-center gap-2 mb-4">
               <div className="w-7 h-7 rounded-full bg-secondary flex items-center justify-center shrink-0">
-                <span className="text-[10px] font-bold">
-                  {identity!
-                    .getPrincipal()
-                    .toString()
-                    .slice(0, 2)
-                    .toUpperCase()}
-                </span>
+                <span className="text-[10px] font-bold">{userInitials}</span>
               </div>
               <Input
                 data-ocid="video.comment.input"
@@ -412,8 +1067,9 @@ export function VideoDetailView({
             <p className="text-xs text-muted-foreground mb-4">
               <button
                 type="button"
+                data-ocid="video.login.button"
                 className="text-primary hover:underline"
-                onClick={() => {}}
+                onClick={onLoginClick}
               >
                 Login
               </button>{" "}
@@ -461,6 +1117,84 @@ export function VideoDetailView({
         </section>
       </div>
     </div>
+  );
+}
+
+function CCLangOption({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full px-4 py-3 text-left text-sm flex items-center justify-between transition-colors hover:bg-secondary ${
+        active ? "text-primary font-semibold" : "text-foreground"
+      }`}
+    >
+      {label}
+      {active && <span className="w-2 h-2 rounded-full bg-primary shrink-0" />}
+    </button>
+  );
+}
+
+function SettingsLangOption({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full py-2 text-left text-sm flex items-center justify-between transition-colors hover:text-primary ${
+        active ? "text-primary font-semibold" : "text-muted-foreground"
+      }`}
+    >
+      {label}
+      {active && <span className="w-2 h-2 rounded-full bg-primary shrink-0" />}
+    </button>
+  );
+}
+
+function QualityRow({
+  label,
+  description,
+  active,
+  onClick,
+}: {
+  label: string;
+  description: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full py-2.5 text-left flex items-center justify-between transition-colors hover:text-primary ${
+        active ? "text-primary" : "text-foreground"
+      }`}
+    >
+      <div className="flex flex-col">
+        <span className={`text-sm ${active ? "font-semibold" : "font-medium"}`}>
+          {label}
+        </span>
+        <span className="text-xs text-muted-foreground">{description}</span>
+      </div>
+      {active && (
+        <Check className="w-4 h-4 text-primary shrink-0" aria-hidden="true" />
+      )}
+    </button>
   );
 }
 

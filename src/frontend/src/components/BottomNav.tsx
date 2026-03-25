@@ -9,8 +9,8 @@ interface BottomNavProps {
 export function BottomNav({ current, onChange }: BottomNavProps) {
   const items = [
     { id: "home" as ViewName, label: "Home", icon: Home },
-    { id: "history" as ViewName, label: "History", icon: Clock },
     { id: "upload" as ViewName, label: null as null, icon: Plus },
+    { id: "history" as ViewName, label: "History", icon: Clock },
     { id: "menu" as ViewName, label: "Menu", icon: Menu },
   ];
 

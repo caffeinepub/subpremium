@@ -20,6 +20,11 @@ export function saveVideos(videos: Video[]): void {
   }
 }
 
+export function deleteVideo(videoId: string): void {
+  const videos = getVideos();
+  saveVideos(videos.filter((v) => v.id !== videoId));
+}
+
 export function getHistory(): Array<{ videoId: string; watchedAt: number }> {
   try {
     const stored = localStorage.getItem(HISTORY_KEY);

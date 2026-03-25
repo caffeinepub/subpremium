@@ -496,29 +496,25 @@ export class StorageClient {
   }
 
   public async putFile(
-    input: Uint8Array | Blob | File,
+    blobBytes: Uint8Array,
     onProgress?: (percentage: number) => void,
   ): Promise<{ hash: string }> {
-    // Normalize input to Blob — avoids loading entire large files into memory when a Blob/File is passed
-    const blob =
-      input instanceof Uint8Array
-        ? new Blob([input.buffer as ArrayBuffer], {
-            type: "application/octet-stream",
-          })
-        : input;
-
     // HTTP headers for fetch requests (used for the PUT request to gateway)
     const httpHeaders: Headers = {
       "Content-Type": "application/json",
     };
+    // Create a Blob from the bytes
+    const file = new Blob([new Uint8Array(blobBytes)], {
+      type: "application/octet-stream",
+    });
     // File metadata headers that will be stored with the blob tree
     const fileHeaders: Headers = {
       "Content-Type": "application/octet-stream",
-      "Content-Length": blob.size.toString(),
+      "Content-Length": file.size.toString(),
     };
 
     const { chunks, chunkHashes, blobHashTree } =
-      await this.processFileForUpload(blob, fileHeaders);
+      await this.processFileForUpload(file, fileHeaders);
     const blobRootHash = blobHashTree.tree.hash;
     const hashString = blobRootHash.toShaString();
 
@@ -527,7 +523,7 @@ export class StorageClient {
     await this.storageGatewayClient.uploadBlobTree(
       blobHashTree,
       this.bucket,
-      blob.size,
+      file.size,
       this.backendCanisterId,
       this.projectId,
       certificateBytes,
@@ -616,7 +612,7 @@ export class StorageClient {
     );
   }
 
-  private createFileChunks(file: Blob, chunkSize = 5 * 1024 * 1024): Blob[] {
+  private createFileChunks(file: Blob, chunkSize = 1024 * 1024): Blob[] {
     const chunks: Blob[] = [];
     const totalChunks = Math.ceil(file.size / chunkSize);
     for (let index = 0; index < totalChunks; index++) {

@@ -24,6 +24,19 @@ export interface Video {
   comments: Comment[];
   likedBy?: string[];
   dislikedBy?: string[];
+  captions?: Array<{ lang: string; url: string }>;
+  sources?: Array<{ quality: string; url: string }>;
 }
 
-export type ViewName = "home" | "video" | "upload" | "history" | "menu";
+export type ViewName =
+  | "home"
+  | "video"
+  | "upload"
+  | "history"
+  | "menu"
+  | "login"
+  | "signup"
+  | "privacy"
+  | "preferences"
+  | "language"
+  | "display";
