@@ -9,9 +9,15 @@ interface VideoCardProps {
   video: Video;
   onClick: (video: Video) => void;
   index: number;
+  watchedPercent?: number;
 }
 
-export function VideoCard({ video, onClick, index }: VideoCardProps) {
+export function VideoCard({
+  video,
+  onClick,
+  index,
+  watchedPercent = 0,
+}: VideoCardProps) {
   return (
     <button
       type="button"
@@ -47,6 +53,13 @@ export function VideoCard({ video, onClick, index }: VideoCardProps) {
         <div className="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/80 rounded text-[10px] font-semibold text-white">
           {formatDuration(video.durationSeconds)}
         </div>
+        {/* Watch progress bar */}
+        {watchedPercent > 0 && (
+          <div
+            className="absolute bottom-0 left-0 h-[3px] bg-red-500 rounded-r"
+            style={{ width: `${watchedPercent}%` }}
+          />
+        )}
       </div>
 
       {/* Metadata */}

@@ -10,6 +10,8 @@ import {
 import { HttpAgent } from "@icp-sdk/core/agent";
 import {
   ArrowLeft,
+  Bookmark,
+  BookmarkCheck,
   Captions,
   Check,
   ChevronRight,
@@ -22,6 +24,7 @@ import {
   ThumbsUp,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { loadConfig } from "../config";
 import { useActor } from "../hooks/useActor";
 import { useAuth } from "../hooks/useAuth";
@@ -35,6 +38,12 @@ import {
   incrementViews,
   updateVideo,
 } from "../utils/videoStorage";
+import {
+  addToWatchLater,
+  isInWatchLater,
+  removeFromWatchLater,
+} from "../utils/watchLater";
+import { getProgress, saveProgress } from "../utils/watchProgress";
 
 interface VideoDetailViewProps {
   video: Video;
@@ -141,6 +150,7 @@ export function VideoDetailView({
   const [captionCues, setCaptionCues] = useState<CueLine[]>([]);
   const [currentCueText, setCurrentCueText] = useState<string | null>(null);
   const restoredTimeRef = useRef<number | null>(null);
+  const lastSaveRef = useRef<number>(0);
 
   // Autoplay state
   const [autoplayCountdown, setAutoplayCountdown] = useState<number | null>(
@@ -148,6 +158,7 @@ export function VideoDetailView({
   );
   const autoplayCancelledRef = useRef(false);
   const autoplayTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [showPlayNextFallback, setShowPlayNextFallback] = useState(false);
 
   // Suggestions: other ready videos excluding current
   const suggestions = allVideos
@@ -270,9 +281,33 @@ export function VideoDetailView({
     return () => el.removeEventListener("timeupdate", onTimeUpdate);
   }, [captionCues]);
 
+  // Track watch progress
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !userId) return;
+    function onTimeUpdate() {
+      if (!el) return;
+      const now = Date.now();
+      if (now - lastSaveRef.current > 5000) {
+        lastSaveRef.current = now;
+        saveProgress(
+          userId,
+          currentVideo.id,
+          el.currentTime,
+          el.duration || currentVideo.durationSeconds,
+        );
+      }
+    }
+    el.addEventListener("timeupdate", onTimeUpdate);
+    return () => el.removeEventListener("timeupdate", onTimeUpdate);
+  }, [userId, currentVideo.id, currentVideo.durationSeconds]);
+
   // Autoplay: start countdown when video ends
   const handleVideoEnded = useCallback(() => {
-    if (!nextVideo || !onVideoSelect) return;
+    if (!nextVideo || !onVideoSelect) {
+      setShowPlayNextFallback(true);
+      return;
+    }
     autoplayCancelledRef.current = false;
     setAutoplayCountdown(5);
   }, [nextVideo, onVideoSelect]);
@@ -283,7 +318,11 @@ export function VideoDetailView({
     if (autoplayCountdown === 0) {
       // play next
       if (!autoplayCancelledRef.current && nextVideo && onVideoSelect) {
-        onVideoSelect(nextVideo);
+        try {
+          onVideoSelect(nextVideo);
+        } catch {
+          setShowPlayNextFallback(true);
+        }
       }
       setAutoplayCountdown(null);
       return;
@@ -301,6 +340,13 @@ export function VideoDetailView({
     setAutoplayCountdown(null);
     if (autoplayTimerRef.current) clearInterval(autoplayTimerRef.current);
   }, []);
+
+  const playNow = useCallback(() => {
+    cancelAutoplay();
+    if (nextVideo && onVideoSelect) {
+      onVideoSelect(nextVideo);
+    }
+  }, [nextVideo, onVideoSelect, cancelAutoplay]);
 
   const selectLang = useCallback((lang: string | null) => {
     setSelectedLang(lang);
@@ -537,10 +583,17 @@ export function VideoDetailView({
             className="w-full h-full"
             onLoadedData={() => {
               setLoadingVideo(false);
-              if (restoredTimeRef.current !== null && videoRef.current) {
-                videoRef.current.currentTime = restoredTimeRef.current;
-                restoredTimeRef.current = null;
+              const saved = getProgress(userId, currentVideo.id);
+              const restoreTime =
+                restoredTimeRef.current !== null
+                  ? restoredTimeRef.current
+                  : saved && saved.progressTime > 5
+                    ? saved.progressTime
+                    : null;
+              if (restoreTime !== null && videoRef.current) {
+                videoRef.current.currentTime = restoreTime;
               }
+              restoredTimeRef.current = null;
               if (videoRef.current) {
                 videoRef.current.playbackRate = playbackRate;
               }
@@ -638,17 +691,42 @@ export function VideoDetailView({
               <p className="text-sm text-white/70 max-w-[200px] line-clamp-2">
                 {nextVideo.title}
               </p>
-              <button
-                type="button"
-                onClick={cancelAutoplay}
-                className="mt-2 px-6 py-2 rounded-full border border-white/50 text-sm font-medium hover:bg-white/10 transition-colors"
-              >
-                Cancel
-              </button>
+              <div className="flex gap-3 mt-2">
+                <button
+                  type="button"
+                  onClick={playNow}
+                  className="px-5 py-2 rounded-full bg-white text-black text-sm font-semibold hover:bg-white/90 transition-colors"
+                >
+                  Play Now
+                </button>
+                <button
+                  type="button"
+                  onClick={cancelAutoplay}
+                  className="px-5 py-2 rounded-full border border-white/50 text-sm font-medium hover:bg-white/10 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
         )}
       </div>
+
+      {/* Fallback: play next button if autoplay failed */}
+      {showPlayNextFallback && nextVideo && (
+        <div className="fixed bottom-20 left-0 right-0 z-50 flex justify-center">
+          <button
+            type="button"
+            onClick={() => {
+              setShowPlayNextFallback(false);
+              onVideoSelect?.(nextVideo);
+            }}
+            className="px-5 py-2 rounded-full bg-black/70 text-white text-sm font-semibold hover:bg-black/90 transition-colors"
+          >
+            ▶ Play next video
+          </button>
+        </div>
+      )}
 
       {/* CC Language Selector Sheet */}
       <Sheet open={showCCMenu} onOpenChange={setShowCCMenu}>
@@ -998,7 +1076,7 @@ export function VideoDetailView({
                   className="flex gap-3 items-start text-left hover:bg-secondary/50 rounded-lg p-1.5 -mx-1.5 transition-colors w-full"
                 >
                   {/* Thumbnail */}
-                  <div className="w-28 h-16 rounded-lg bg-secondary shrink-0 overflow-hidden">
+                  <div className="relative w-28 h-16 rounded-lg bg-secondary shrink-0 overflow-hidden">
                     {v.thumbnailDataUrl ? (
                       <img
                         src={v.thumbnailDataUrl}
@@ -1025,6 +1103,33 @@ export function VideoDetailView({
                       {formatViewsShort(v.views)} views
                     </p>
                   </div>
+                  {/* Save to Watch Later */}
+                  <button
+                    type="button"
+                    data-ocid="video.suggestions.toggle"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!userId) {
+                        toast("Login to save videos");
+                        return;
+                      }
+                      if (isInWatchLater(userId, v.id)) {
+                        removeFromWatchLater(userId, v.id);
+                        toast("Removed from Watch Later");
+                      } else {
+                        addToWatchLater(userId, v.id);
+                        toast("Saved to Watch Later");
+                      }
+                    }}
+                    className="p-1.5 shrink-0 text-muted-foreground hover:text-primary transition-colors"
+                    aria-label="Save to Watch Later"
+                  >
+                    {userId && isInWatchLater(userId, v.id) ? (
+                      <BookmarkCheck className="w-4 h-4 text-primary" />
+                    ) : (
+                      <Bookmark className="w-4 h-4" />
+                    )}
+                  </button>
                 </button>
               ))}
             </div>

@@ -28,6 +28,7 @@ import { PrivacyView } from "./views/PrivacyView";
 import { SignupView } from "./views/SignupView";
 import { UploadView } from "./views/UploadView";
 import { VideoDetailView } from "./views/VideoDetailView";
+import { WatchLaterView } from "./views/WatchLaterView";
 
 const SETTINGS_VIEWS: ViewName[] = [
   "privacy",
@@ -223,6 +224,7 @@ function AppInner() {
             onSearchChange={setSearchQuery}
             onProfileClick={() => handleNavChange("menu")}
             onLoginClick={goToLogin}
+            onSavedClick={() => handleNavChange("watchlater")}
             onBellClick={() => setNotifPanelOpen(true)}
             unreadCount={unreadCount}
           />
@@ -280,6 +282,7 @@ function AppInner() {
 
           {currentView === "video" && selectedVideo && (
             <VideoDetailView
+              key={selectedVideo.id}
               video={selectedVideo}
               onBack={handleBack}
               onVideoUpdate={handleVideoUpdate}
@@ -298,6 +301,10 @@ function AppInner() {
 
           {currentView === "history" && (
             <HistoryView videos={videos} onVideoClick={handleVideoClick} />
+          )}
+
+          {currentView === "watchlater" && (
+            <WatchLaterView videos={videos} onVideoClick={handleVideoClick} />
           )}
 
           {currentView === "menu" && (

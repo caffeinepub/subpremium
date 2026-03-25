@@ -1,5 +1,5 @@
 import { Input } from "@/components/ui/input";
-import { Bell, Play, Search, User } from "lucide-react";
+import { Bell, Bookmark, Play, Search, User } from "lucide-react";
 import { useAuth } from "../hooks/useAuth";
 
 interface HeaderProps {
@@ -8,6 +8,7 @@ interface HeaderProps {
   onProfileClick: () => void;
   onLoginClick: () => void;
   onBellClick: () => void;
+  onSavedClick: () => void;
   unreadCount: number;
 }
 
@@ -17,6 +18,7 @@ export function Header({
   onProfileClick,
   onLoginClick,
   onBellClick,
+  onSavedClick,
   unreadCount,
 }: HeaderProps) {
   const { user } = useAuth();
@@ -42,6 +44,18 @@ export function Header({
 
           {/* Actions */}
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-ocid="header.saved.button"
+              onClick={onSavedClick}
+              className="relative w-8 h-8 flex items-center justify-center rounded-full hover:bg-secondary transition-colors"
+              aria-label="Watch Later"
+            >
+              <Bookmark
+                className="w-[18px] h-[18px] text-foreground"
+                aria-hidden="true"
+              />
+            </button>
             <button
               type="button"
               data-ocid="header.bell.button"

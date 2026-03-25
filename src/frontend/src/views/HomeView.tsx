@@ -3,8 +3,10 @@ import { Separator } from "@/components/ui/separator";
 import { FileVideo, Pause, Play, Upload, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { VideoCard } from "../components/VideoCard";
+import { useAuth } from "../hooks/useAuth";
 import { useUploadManager } from "../hooks/useUploadManager";
 import type { Video } from "../types/video";
+import { getWatchedPercent } from "../utils/watchProgress";
 
 interface HomeViewProps {
   videos: Video[];
@@ -21,6 +23,8 @@ export function HomeView({
 }: HomeViewProps) {
   const { uploadTasks, cancelUpload, pauseUpload, resumeUpload } =
     useUploadManager();
+  const { user } = useAuth();
+  const userId = user?.userId ?? "";
 
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
 
@@ -284,7 +288,12 @@ export function HomeView({
                 {(i > 0 || pendingVideos.length > 0) && (
                   <Separator className="bg-border my-2" />
                 )}
-                <VideoCard video={video} onClick={onVideoClick} index={i + 1} />
+                <VideoCard
+                  video={video}
+                  onClick={onVideoClick}
+                  index={i + 1}
+                  watchedPercent={getWatchedPercent(userId, video.id)}
+                />
               </div>
             ))}
           </div>

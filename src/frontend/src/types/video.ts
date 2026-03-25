@@ -33,6 +33,7 @@ export type ViewName =
   | "video"
   | "upload"
   | "history"
+  | "watchlater"
   | "menu"
   | "login"
   | "signup"
