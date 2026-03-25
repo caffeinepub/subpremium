@@ -1,3 +1,7 @@
+import { getAuthToken } from "../hooks/useAuth";
+import { getBackendActor } from "./backendActor";
+import { syncWatchProgressToBackend } from "./userDataSync";
+
 const KEY = (userId: string, videoId: string) =>
   `subpremium_progress_${userId}_${videoId}`;
 
@@ -15,6 +19,22 @@ export function saveProgress(
   if (!userId || !videoId) return;
   const data: ProgressData = { progressTime, durationSeconds };
   localStorage.setItem(KEY(userId, videoId), JSON.stringify(data));
+  // Fire-and-forget backend sync
+  const token = getAuthToken();
+  if (token) {
+    getBackendActor()
+      .then((actor) =>
+        syncWatchProgressToBackend(
+          userId,
+          token,
+          videoId,
+          progressTime,
+          durationSeconds,
+          actor,
+        ),
+      )
+      .catch(() => {});
+  }
 }
 
 export function getProgress(

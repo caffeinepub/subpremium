@@ -7,6 +7,7 @@ import Text "mo:core/Text";
 import Time "mo:core/Time";
 import Int "mo:core/Int";
 import Nat "mo:core/Nat";
+import Float "mo:core/Float";
 import Iter "mo:core/Iter";
 import Principal "mo:core/Principal";
 import Runtime "mo:core/Runtime";
@@ -92,6 +93,35 @@ actor {
     status : Text;
   };
 
+  // --- User data persistence types ---
+  type HistoryEntry = {
+    videoId : Text;
+    watchedAt : Int;
+  };
+
+  type WatchProgressEntry = {
+    videoId : Text;
+    progressTime : Float;
+    durationSeconds : Float;
+    updatedAt : Int;
+  };
+
+  type PlaylistRecord = {
+    playlistId : Text;
+    name : Text;
+    videoIds : [Text];
+    createdAt : Int;
+  };
+
+  type UserData = {
+    userId : Text;
+    username : Text;
+    avatarUrl : Text;
+    watchLater : [Text];
+    history : [HistoryEntry];
+    playlists : [PlaylistRecord];
+  };
+
   // --- Stable state ---
 
   let usersByEmail = Map.empty<Text, UserRecord>();
@@ -108,6 +138,10 @@ actor {
   let principalToUserId = Map.empty<Principal, Text>();
 
   let ONE_YEAR_NS : Int = 365 * 24 * 60 * 60 * 1_000_000_000;
+
+  // User data maps
+  let userDataMap = Map.empty<Text, UserData>();
+  let watchProgressMap = Map.empty<Text, WatchProgressEntry>();
 
   func makeToken() : Text {
     tokenCounter += 1;
@@ -189,6 +223,93 @@ actor {
 
   public func getUserProfile(token : Text) : async ProfileResult {
     await validateSession(token)
+  };
+
+  // --- User data persistence API ---
+
+  public query func getUserAllData(userId : Text) : async ?UserData {
+    userDataMap.get(userId)
+  };
+
+  public shared func updateUserExtra(token : Text, username : Text, avatarUrl : Text) : async Bool {
+    switch (validateToken(token)) {
+      case null { false };
+      case (?userId) {
+        let existing = switch (userDataMap.get(userId)) {
+          case null {
+            {
+              userId;
+              username = "";
+              avatarUrl = "";
+              watchLater = [];
+              history = [];
+              playlists = [];
+            }
+          };
+          case (?d) { d };
+        };
+        userDataMap.add(userId, { existing with username; avatarUrl });
+        true
+      };
+    }
+  };
+
+  public shared func saveUserData(
+    token : Text,
+    watchLater : [Text],
+    history : [HistoryEntry],
+    playlists : [PlaylistRecord],
+  ) : async Bool {
+    switch (validateToken(token)) {
+      case null { false };
+      case (?userId) {
+        let existing = switch (userDataMap.get(userId)) {
+          case null {
+            {
+              userId;
+              username = "";
+              avatarUrl = "";
+              watchLater = [];
+              history = [];
+              playlists = [];
+            }
+          };
+          case (?d) { d };
+        };
+        userDataMap.add(userId, { existing with watchLater; history; playlists });
+        true
+      };
+    }
+  };
+
+  public shared func saveWatchProgress(
+    token : Text,
+    videoId : Text,
+    progressTime : Float,
+    durationSeconds : Float,
+  ) : async Bool {
+    switch (validateToken(token)) {
+      case null { false };
+      case (?userId) {
+        let key = userId # "_" # videoId;
+        let entry : WatchProgressEntry = {
+          videoId;
+          progressTime;
+          durationSeconds;
+          updatedAt = Time.now();
+        };
+        watchProgressMap.add(key, entry);
+        true
+      };
+    }
+  };
+
+  public query func getWatchProgressAll(userId : Text) : async [WatchProgressEntry] {
+    let prefix = userId # "_";
+    watchProgressMap.entries()
+      .filter(func((k, _v)) { k.startsWith(#text prefix) })
+      .map(func((_k, v)) { v })
+      .toArray()
   };
 
   // --- Video API (no principal-based auth — uses creatorId from input) ---

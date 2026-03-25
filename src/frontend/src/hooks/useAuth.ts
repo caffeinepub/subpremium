@@ -9,6 +9,10 @@ import {
   useState,
 } from "react";
 import { getBackendActor } from "../utils/backendActor";
+import {
+  hydrateUserDataFromBackend,
+  syncProfileExtrasToBackend,
+} from "../utils/userDataSync";
 
 export interface AuthUser {
   userId: string;
@@ -192,6 +196,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return result.err;
         }
         const { token, userId, displayName } = result.ok;
+
+        // Hydrate all user data from backend BEFORE building authUser
+        // so profile extras (username, avatar) are available immediately.
+        await withTimeout(
+          hydrateUserDataFromBackend(userId, token, actor),
+          3000,
+        );
+
+        // Now read freshly hydrated profile extras
         const extras = getProfileExtras(userId);
         const authUser: AuthUser = {
           userId,
@@ -256,6 +269,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         const { token, userId } = loginResult.ok;
+        // New account — no existing data to hydrate, skip hydrateUserDataFromBackend
         const authUser: AuthUser = {
           userId,
           email: normalizedEmail,
@@ -338,6 +352,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         saveSession({ ...session, user: updatedUser });
       }
       setUser(updatedUser);
+
+      // Sync profile extras to backend in background
+      if (session?.token) {
+        getBackendActor()
+          .then((actor) =>
+            syncProfileExtrasToBackend(
+              user.userId,
+              session.token,
+              trimmedUsername,
+              extras.avatarUrl || "",
+              actor,
+            ),
+          )
+          .catch(() => {});
+      }
+
       return null;
     },
     [user, checkUsername],

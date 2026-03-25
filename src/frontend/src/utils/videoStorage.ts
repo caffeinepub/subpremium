@@ -1,4 +1,7 @@
+import { getAuthToken } from "../hooks/useAuth";
 import type { Video } from "../types/video";
+import { getBackendActor } from "./backendActor";
+import { syncHistoryToBackend } from "./userDataSync";
 
 const STORAGE_KEY = "subpremium_videos";
 const HISTORY_KEY = "subpremium_history";
@@ -44,6 +47,21 @@ export function addToHistory(videoId: string): void {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
   } catch (e) {
     console.error("Failed to save history:", e);
+  }
+
+  // Fire-and-forget backend sync
+  try {
+    const raw = localStorage.getItem("subpremium_session");
+    const session = raw ? JSON.parse(raw) : null;
+    const userId: string | undefined = session?.user?.userId;
+    const token = getAuthToken();
+    if (userId && token) {
+      getBackendActor()
+        .then((actor) => syncHistoryToBackend(userId, token, actor))
+        .catch(() => {});
+    }
+  } catch {
+    // Silent
   }
 }
 
