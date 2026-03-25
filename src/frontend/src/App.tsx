@@ -1,8 +1,10 @@
 import { Toaster } from "@/components/ui/sonner";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { VideoRecord } from "./backend";
 import { BottomNav } from "./components/BottomNav";
 import { Header } from "./components/Header";
 import { NotificationsPanel } from "./components/NotificationsPanel";
+import { useActor } from "./hooks/useActor";
 import { AuthProvider } from "./hooks/useAuth";
 import { useAuth } from "./hooks/useAuth";
 import {
@@ -17,6 +19,7 @@ import {
 import { UploadManagerProvider } from "./hooks/useUploadManager";
 import type { Video, ViewName } from "./types/video";
 import { getVideos } from "./utils/videoStorage";
+import { CreatorProfileView } from "./views/CreatorProfileView";
 import { DisplayView } from "./views/DisplayView";
 import { HistoryView } from "./views/HistoryView";
 import { HomeView } from "./views/HomeView";
@@ -36,6 +39,35 @@ const SETTINGS_VIEWS: ViewName[] = [
   "language",
   "display",
 ];
+
+function videoRecordToVideo(r: VideoRecord): Video {
+  return {
+    id: r.videoId,
+    title: r.title,
+    description: r.description,
+    creatorName: r.creatorName,
+    creatorId: r.creatorId,
+    blobHash: r.blobHash,
+    thumbnailDataUrl: r.thumbnailUrl || undefined,
+    durationSeconds: Number(r.durationSeconds),
+    fileSizeBytes: Number(r.fileSizeBytes),
+    views: Number(r.views),
+    likes: Number(r.likes),
+    dislikes: Number(r.dislikes),
+    createdAt: Number(r.createdAt),
+    status: r.status as "uploading" | "processing" | "ready",
+    comments: r.comments.map((c) => ({
+      id: c.commentId,
+      text: c.text,
+      authorName: c.authorName,
+      authorId: c.authorId,
+      createdAt: Number(c.createdAt),
+    })),
+    likedBy: r.likedBy,
+    dislikedBy: r.dislikedBy,
+    sources: r.videoUrl ? [{ quality: "Auto", url: r.videoUrl }] : undefined,
+  };
+}
 
 // Animated in-app notification popup
 function NotificationPopup({
@@ -113,9 +145,13 @@ function AppInner() {
   const [prevView, setPrevView] = useState<ViewName>("home");
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
   const [videos, setVideos] = useState<Video[]>(() => getVideos());
+  const [videosLoading, setVideosLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
+  const [profileCreatorId, setProfileCreatorId] = useState("");
+  const [profileCreatorName, setProfileCreatorName] = useState("");
   const { settings } = useSettings();
-  const { user } = useAuth();
+  const { user, isLoading: authLoading } = useAuth();
+  const { actor, isFetching } = useActor();
   const { notifications, markAllRead, unreadCount } = useNotifications(
     user?.userId ?? "",
   );
@@ -124,10 +160,37 @@ function AppInner() {
   // In-app notification popup queue
   const [popupNotif, setPopupNotif] = useState<AppNotification | null>(null);
   const lastNotifIdRef = useRef<string | null>(null);
+  // Track last userId to detect login/logout and re-fetch videos
+  const lastUserIdRef = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
     applySettings(settings);
   }, [settings]);
+
+  // Fetch all videos from backend when actor is ready or user changes
+  useEffect(() => {
+    if (isFetching || authLoading || !actor) return;
+
+    // Re-fetch when user changes (login/logout)
+    if (lastUserIdRef.current === user?.userId) return;
+    lastUserIdRef.current = user?.userId ?? null;
+
+    setVideosLoading(true);
+    (async () => {
+      try {
+        const backendVideos = await actor.getAllVideos();
+        const mapped = backendVideos.map(videoRecordToVideo);
+        // Keep in-progress uploads from localStorage, replace ready videos with backend data
+        const uploadingFromLS = getVideos().filter((v) => v.status !== "ready");
+        setVideos([...uploadingFromLS, ...mapped]);
+      } catch (e) {
+        console.error("[home] failed to fetch backend videos:", e);
+        // Fallback: keep localStorage videos as-is
+      } finally {
+        setVideosLoading(false);
+      }
+    })();
+  }, [actor, isFetching, authLoading, user?.userId]);
 
   // Listen for new notifications to show popup
   useEffect(() => {
@@ -153,6 +216,16 @@ function AppInner() {
     setCurrentView("home");
     setSelectedVideo(null);
   }, []);
+
+  const handleCreatorClick = useCallback(
+    (creatorId: string, creatorName: string) => {
+      setProfileCreatorId(creatorId);
+      setProfileCreatorName(creatorName);
+      setCurrentView("profile");
+      window.scrollTo(0, 0);
+    },
+    [],
+  );
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -207,9 +280,11 @@ function AppInner() {
   const showHeader =
     currentView !== "video" &&
     currentView !== "upload" &&
+    currentView !== "profile" &&
     !isAuthView &&
     !isSettingsView;
-  const showBottomNav = !isAuthView && !isSettingsView;
+  const showBottomNav =
+    !isAuthView && !isSettingsView && currentView !== "profile";
 
   return (
     <UploadManagerProvider
@@ -264,7 +339,10 @@ function AppInner() {
           className="max-w-md mx-auto"
           style={{
             paddingTop:
-              currentView === "video" || isAuthView || isSettingsView
+              currentView === "video" ||
+              currentView === "profile" ||
+              isAuthView ||
+              isSettingsView
                 ? "0px"
                 : "104px",
             paddingBottom: "0px",
@@ -277,6 +355,8 @@ function AppInner() {
               searchQuery={searchQuery}
               onVideoClick={handleVideoClick}
               onUploadClick={() => handleNavChange("upload")}
+              isLoadingVideos={videosLoading}
+              onCreatorClick={handleCreatorClick}
             />
           )}
 
@@ -289,6 +369,16 @@ function AppInner() {
               onLoginClick={goToLogin}
               allVideos={videos}
               onVideoSelect={handleVideoClick}
+              onCreatorClick={handleCreatorClick}
+            />
+          )}
+
+          {currentView === "profile" && (
+            <CreatorProfileView
+              creatorId={profileCreatorId}
+              creatorName={profileCreatorName}
+              onBack={() => setCurrentView("home")}
+              onVideoClick={handleVideoClick}
             />
           )}
 

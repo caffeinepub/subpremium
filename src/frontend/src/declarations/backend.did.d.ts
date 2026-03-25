@@ -10,9 +10,66 @@ import type { ActorMethod } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import type { Principal } from '@icp-sdk/core/principal';
 
+export type AuthResult = { 'ok' : string } |
+  { 'err' : string };
+export interface Comment {
+  'commentId' : string,
+  'authorId' : string,
+  'createdAt' : bigint,
+  'text' : string,
+  'authorName' : string,
+}
+export type LoginResult = {
+    'ok' : { 'token' : string, 'displayName' : string, 'userId' : string }
+  } |
+  { 'err' : string };
+export type ProfileResult = { 'ok' : UserProfile } |
+  { 'err' : string };
+export interface UserProfile {
+  'displayName' : string,
+  'userId' : string,
+  'email' : string,
+}
 export type UserRole = { 'admin' : null } |
   { 'user' : null } |
   { 'guest' : null };
+export interface VideoInput {
+  'title' : string,
+  'thumbnailUrl' : string,
+  'isPremium' : boolean,
+  'creatorId' : string,
+  'fileSizeBytes' : bigint,
+  'description' : string,
+  'creatorName' : string,
+  'blobHash' : string,
+  'durationSeconds' : bigint,
+}
+export interface VideoRecord {
+  'status' : string,
+  'title' : string,
+  'thumbnailUrl' : string,
+  'views' : bigint,
+  'isPremium' : boolean,
+  'createdAt' : bigint,
+  'creatorId' : string,
+  'fileSizeBytes' : bigint,
+  'description' : string,
+  'likedBy' : Array<string>,
+  'creatorName' : string,
+  'blobHash' : string,
+  'likes' : bigint,
+  'durationSeconds' : bigint,
+  'dislikedBy' : Array<string>,
+  'comments' : Array<Comment>,
+  'dislikes' : bigint,
+  'videoUrl' : string,
+  'videoId' : string,
+}
+export interface VideoUpdateInput {
+  'status' : string,
+  'videoUrl' : string,
+  'videoId' : string,
+}
 export interface _CaffeineStorageCreateCertificateResult {
   'method' : string,
   'blob_hash' : string,
@@ -41,9 +98,26 @@ export interface _SERVICE {
   >,
   '_caffeineStorageUpdateGatewayPrincipals' : ActorMethod<[], undefined>,
   '_initializeAccessControlWithSecret' : ActorMethod<[string], undefined>,
+  'addComment' : ActorMethod<[string, string], boolean>,
+  'addVideo' : ActorMethod<[VideoInput], VideoRecord>,
   'assignCallerUserRole' : ActorMethod<[Principal, UserRole], undefined>,
+  'deleteVideo' : ActorMethod<[string], boolean>,
+  'getAllVideos' : ActorMethod<[], Array<VideoRecord>>,
   'getCallerUserRole' : ActorMethod<[], UserRole>,
+  'getComments' : ActorMethod<[string], Array<Comment>>,
+  'getUserProfile' : ActorMethod<[string], ProfileResult>,
+  'getVideo' : ActorMethod<[string], [] | [VideoRecord]>,
+  'getVideosByCreator' : ActorMethod<[string], Array<VideoRecord>>,
+  'incrementViewCount' : ActorMethod<[string], boolean>,
   'isCallerAdmin' : ActorMethod<[], boolean>,
+  'loginUser' : ActorMethod<[string, string], LoginResult>,
+  'logoutUser' : ActorMethod<[string], undefined>,
+  'registerUser' : ActorMethod<[string, string, string], AuthResult>,
+  'searchVideos' : ActorMethod<[string], Array<VideoRecord>>,
+  'toggleDislike' : ActorMethod<[string], boolean>,
+  'toggleLike' : ActorMethod<[string], boolean>,
+  'updateVideoStatus' : ActorMethod<[VideoUpdateInput], boolean>,
+  'validateSession' : ActorMethod<[string], ProfileResult>,
 }
 export declare const idlService: IDL.ServiceClass;
 export declare const idlInitArgs: IDL.Type[];

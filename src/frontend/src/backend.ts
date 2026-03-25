@@ -89,16 +89,90 @@ export class ExternalBlob {
         return this;
     }
 }
+export interface VideoInput {
+    title: string;
+    thumbnailUrl: string;
+    isPremium: boolean;
+    creatorId: string;
+    fileSizeBytes: bigint;
+    description: string;
+    creatorName: string;
+    blobHash: string;
+    durationSeconds: bigint;
+}
+export interface VideoRecord {
+    status: string;
+    title: string;
+    thumbnailUrl: string;
+    views: bigint;
+    isPremium: boolean;
+    createdAt: bigint;
+    creatorId: string;
+    fileSizeBytes: bigint;
+    description: string;
+    likedBy: Array<string>;
+    creatorName: string;
+    blobHash: string;
+    likes: bigint;
+    durationSeconds: bigint;
+    dislikedBy: Array<string>;
+    comments: Array<Comment>;
+    dislikes: bigint;
+    videoUrl: string;
+    videoId: string;
+}
+export type ProfileResult = {
+    __kind__: "ok";
+    ok: UserProfile;
+} | {
+    __kind__: "err";
+    err: string;
+};
+export interface Comment {
+    commentId: string;
+    authorId: string;
+    createdAt: bigint;
+    text: string;
+    authorName: string;
+}
+export interface _CaffeineStorageRefillInformation {
+    proposed_top_up_amount?: bigint;
+}
+export interface VideoUpdateInput {
+    status: string;
+    videoUrl: string;
+    videoId: string;
+}
+export type LoginResult = {
+    __kind__: "ok";
+    ok: {
+        token: string;
+        displayName: string;
+        userId: string;
+    };
+} | {
+    __kind__: "err";
+    err: string;
+};
 export interface _CaffeineStorageCreateCertificateResult {
     method: string;
     blob_hash: string;
 }
+export type AuthResult = {
+    __kind__: "ok";
+    ok: string;
+} | {
+    __kind__: "err";
+    err: string;
+};
 export interface _CaffeineStorageRefillResult {
     success?: boolean;
     topped_up_amount?: bigint;
 }
-export interface _CaffeineStorageRefillInformation {
-    proposed_top_up_amount?: bigint;
+export interface UserProfile {
+    displayName: string;
+    userId: string;
+    email: string;
 }
 export enum UserRole {
     admin = "admin",
@@ -113,11 +187,28 @@ export interface backendInterface {
     _caffeineStorageRefillCashier(refillInformation: _CaffeineStorageRefillInformation | null): Promise<_CaffeineStorageRefillResult>;
     _caffeineStorageUpdateGatewayPrincipals(): Promise<void>;
     _initializeAccessControlWithSecret(userSecret: string): Promise<void>;
+    addComment(videoId: string, text: string): Promise<boolean>;
+    addVideo(videoInput: VideoInput): Promise<VideoRecord>;
     assignCallerUserRole(user: Principal, role: UserRole): Promise<void>;
+    deleteVideo(videoId: string): Promise<boolean>;
+    getAllVideos(): Promise<Array<VideoRecord>>;
     getCallerUserRole(): Promise<UserRole>;
+    getComments(videoId: string): Promise<Array<Comment>>;
+    getUserProfile(token: string): Promise<ProfileResult>;
+    getVideo(videoId: string): Promise<VideoRecord | null>;
+    getVideosByCreator(creatorId: string): Promise<Array<VideoRecord>>;
+    incrementViewCount(videoId: string): Promise<boolean>;
     isCallerAdmin(): Promise<boolean>;
+    loginUser(email: string, passwordHash: string): Promise<LoginResult>;
+    logoutUser(token: string): Promise<void>;
+    registerUser(email: string, passwordHash: string, displayName: string): Promise<AuthResult>;
+    searchVideos(searchTerm: string): Promise<Array<VideoRecord>>;
+    toggleDislike(videoId: string): Promise<boolean>;
+    toggleLike(videoId: string): Promise<boolean>;
+    updateVideoStatus(input: VideoUpdateInput): Promise<boolean>;
+    validateSession(token: string): Promise<ProfileResult>;
 }
-import type { UserRole as _UserRole, _CaffeineStorageRefillInformation as __CaffeineStorageRefillInformation, _CaffeineStorageRefillResult as __CaffeineStorageRefillResult } from "./declarations/backend.did.d.ts";
+import type { AuthResult as _AuthResult, LoginResult as _LoginResult, ProfileResult as _ProfileResult, UserProfile as _UserProfile, UserRole as _UserRole, VideoRecord as _VideoRecord, _CaffeineStorageRefillInformation as __CaffeineStorageRefillInformation, _CaffeineStorageRefillResult as __CaffeineStorageRefillResult } from "./declarations/backend.did.d.ts";
 export class Backend implements backendInterface {
     constructor(private actor: ActorSubclass<_SERVICE>, private _uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, private _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, private processError?: (error: unknown) => never){}
     async _caffeineStorageBlobIsLive(arg0: Uint8Array): Promise<boolean> {
@@ -218,6 +309,34 @@ export class Backend implements backendInterface {
             return result;
         }
     }
+    async addComment(arg0: string, arg1: string): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.addComment(arg0, arg1);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.addComment(arg0, arg1);
+            return result;
+        }
+    }
+    async addVideo(arg0: VideoInput): Promise<VideoRecord> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.addVideo(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.addVideo(arg0);
+            return result;
+        }
+    }
     async assignCallerUserRole(arg0: Principal, arg1: UserRole): Promise<void> {
         if (this.processError) {
             try {
@@ -229,6 +348,34 @@ export class Backend implements backendInterface {
             }
         } else {
             const result = await this.actor.assignCallerUserRole(arg0, to_candid_UserRole_n8(this._uploadFile, this._downloadFile, arg1));
+            return result;
+        }
+    }
+    async deleteVideo(arg0: string): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.deleteVideo(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.deleteVideo(arg0);
+            return result;
+        }
+    }
+    async getAllVideos(): Promise<Array<VideoRecord>> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getAllVideos();
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getAllVideos();
             return result;
         }
     }
@@ -246,6 +393,76 @@ export class Backend implements backendInterface {
             return from_candid_UserRole_n10(this._uploadFile, this._downloadFile, result);
         }
     }
+    async getComments(arg0: string): Promise<Array<Comment>> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getComments(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getComments(arg0);
+            return result;
+        }
+    }
+    async getUserProfile(arg0: string): Promise<ProfileResult> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getUserProfile(arg0);
+                return from_candid_ProfileResult_n12(this._uploadFile, this._downloadFile, result);
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getUserProfile(arg0);
+            return from_candid_ProfileResult_n12(this._uploadFile, this._downloadFile, result);
+        }
+    }
+    async getVideo(arg0: string): Promise<VideoRecord | null> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getVideo(arg0);
+                return from_candid_opt_n14(this._uploadFile, this._downloadFile, result);
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getVideo(arg0);
+            return from_candid_opt_n14(this._uploadFile, this._downloadFile, result);
+        }
+    }
+    async getVideosByCreator(arg0: string): Promise<Array<VideoRecord>> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getVideosByCreator(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getVideosByCreator(arg0);
+            return result;
+        }
+    }
+    async incrementViewCount(arg0: string): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.incrementViewCount(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.incrementViewCount(arg0);
+            return result;
+        }
+    }
     async isCallerAdmin(): Promise<boolean> {
         if (this.processError) {
             try {
@@ -260,12 +477,136 @@ export class Backend implements backendInterface {
             return result;
         }
     }
+    async loginUser(arg0: string, arg1: string): Promise<LoginResult> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.loginUser(arg0, arg1);
+                return from_candid_LoginResult_n15(this._uploadFile, this._downloadFile, result);
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.loginUser(arg0, arg1);
+            return from_candid_LoginResult_n15(this._uploadFile, this._downloadFile, result);
+        }
+    }
+    async logoutUser(arg0: string): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.logoutUser(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.logoutUser(arg0);
+            return result;
+        }
+    }
+    async registerUser(arg0: string, arg1: string, arg2: string): Promise<AuthResult> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.registerUser(arg0, arg1, arg2);
+                return from_candid_AuthResult_n17(this._uploadFile, this._downloadFile, result);
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.registerUser(arg0, arg1, arg2);
+            return from_candid_AuthResult_n17(this._uploadFile, this._downloadFile, result);
+        }
+    }
+    async searchVideos(arg0: string): Promise<Array<VideoRecord>> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.searchVideos(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.searchVideos(arg0);
+            return result;
+        }
+    }
+    async toggleDislike(arg0: string): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.toggleDislike(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.toggleDislike(arg0);
+            return result;
+        }
+    }
+    async toggleLike(arg0: string): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.toggleLike(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.toggleLike(arg0);
+            return result;
+        }
+    }
+    async updateVideoStatus(arg0: VideoUpdateInput): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.updateVideoStatus(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.updateVideoStatus(arg0);
+            return result;
+        }
+    }
+    async validateSession(arg0: string): Promise<ProfileResult> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.validateSession(arg0);
+                return from_candid_ProfileResult_n12(this._uploadFile, this._downloadFile, result);
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.validateSession(arg0);
+            return from_candid_ProfileResult_n12(this._uploadFile, this._downloadFile, result);
+        }
+    }
+}
+function from_candid_AuthResult_n17(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: _AuthResult): AuthResult {
+    return from_candid_variant_n18(_uploadFile, _downloadFile, value);
+}
+function from_candid_LoginResult_n15(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: _LoginResult): LoginResult {
+    return from_candid_variant_n16(_uploadFile, _downloadFile, value);
+}
+function from_candid_ProfileResult_n12(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: _ProfileResult): ProfileResult {
+    return from_candid_variant_n13(_uploadFile, _downloadFile, value);
 }
 function from_candid_UserRole_n10(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: _UserRole): UserRole {
     return from_candid_variant_n11(_uploadFile, _downloadFile, value);
 }
 function from_candid__CaffeineStorageRefillResult_n4(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: __CaffeineStorageRefillResult): _CaffeineStorageRefillResult {
     return from_candid_record_n5(_uploadFile, _downloadFile, value);
+}
+function from_candid_opt_n14(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: [] | [_VideoRecord]): VideoRecord | null {
+    return value.length === 0 ? null : value[0];
 }
 function from_candid_opt_n6(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: [] | [boolean]): boolean | null {
     return value.length === 0 ? null : value[0];
@@ -293,6 +634,71 @@ function from_candid_variant_n11(_uploadFile: (file: ExternalBlob) => Promise<Ui
     guest: null;
 }): UserRole {
     return "admin" in value ? UserRole.admin : "user" in value ? UserRole.user : "guest" in value ? UserRole.guest : value;
+}
+function from_candid_variant_n13(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: {
+    ok: _UserProfile;
+} | {
+    err: string;
+}): {
+    __kind__: "ok";
+    ok: UserProfile;
+} | {
+    __kind__: "err";
+    err: string;
+} {
+    return "ok" in value ? {
+        __kind__: "ok",
+        ok: value.ok
+    } : "err" in value ? {
+        __kind__: "err",
+        err: value.err
+    } : value;
+}
+function from_candid_variant_n16(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: {
+    ok: {
+        token: string;
+        displayName: string;
+        userId: string;
+    };
+} | {
+    err: string;
+}): {
+    __kind__: "ok";
+    ok: {
+        token: string;
+        displayName: string;
+        userId: string;
+    };
+} | {
+    __kind__: "err";
+    err: string;
+} {
+    return "ok" in value ? {
+        __kind__: "ok",
+        ok: value.ok
+    } : "err" in value ? {
+        __kind__: "err",
+        err: value.err
+    } : value;
+}
+function from_candid_variant_n18(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: {
+    ok: string;
+} | {
+    err: string;
+}): {
+    __kind__: "ok";
+    ok: string;
+} | {
+    __kind__: "err";
+    err: string;
+} {
+    return "ok" in value ? {
+        __kind__: "ok",
+        ok: value.ok
+    } : "err" in value ? {
+        __kind__: "err",
+        err: value.err
+    } : value;
 }
 function to_candid_UserRole_n8(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: UserRole): _UserRole {
     return to_candid_variant_n9(_uploadFile, _downloadFile, value);

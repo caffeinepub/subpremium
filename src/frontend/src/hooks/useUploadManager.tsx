@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { loadConfig } from "../config";
 import type { Video } from "../types/video";
 import { StorageClient } from "../utils/StorageClient";
+import { getBackendActor } from "../utils/backendActor";
 import {
   deleteSession,
   loadAllSessions,
@@ -299,6 +300,22 @@ export function UploadManagerProvider({
 
           const url = await sc.getDirectURL(hash);
 
+          // Save to backend
+          try {
+            const backendActor = await getBackendActor();
+            await backendActor.updateVideoStatus({
+              videoId,
+              status: "ready",
+              videoUrl: url,
+            });
+          } catch (e) {
+            console.error(
+              "[upload] failed to update video status in backend:",
+              e,
+            );
+            // Continue — video is still in localStorage as fallback
+          }
+
           const readyVideo: Video = {
             ...video,
             blobHash: hash,
@@ -491,61 +508,88 @@ export function UploadManagerProvider({
         return;
       }
 
-      const videoId = crypto.randomUUID();
       const totalChunks = Math.ceil(params.file.size / (5 * 1024 * 1024));
 
-      const newVideo: Video = {
-        id: videoId,
-        title: params.title.trim(),
-        description: params.description.trim(),
-        creatorName: params.displayName || "Anonymous",
-        creatorId: params.userId || "anonymous",
-        blobHash: "",
-        thumbnailDataUrl: params.thumbnailDataUrl,
-        durationSeconds: Math.round(params.duration),
-        fileSizeBytes: params.file.size,
-        views: 0,
-        likes: 0,
-        dislikes: 0,
-        createdAt: Date.now(),
-        status: "uploading",
-        comments: [],
-      };
+      // Register the video in the backend first to get a stable videoId,
+      // then fall back to crypto.randomUUID() if that fails.
+      (async () => {
+        let videoId: string = crypto.randomUUID();
 
-      const existing = getVideos();
-      saveVideos([newVideo, ...existing]);
-      onVideoAddedRef.current(newVideo);
+        try {
+          const backendActor = await getBackendActor();
+          const videoRecord = await backendActor.addVideo({
+            title: params.title.trim(),
+            description: params.description.trim(),
+            creatorId: params.userId || "anonymous",
+            creatorName: params.displayName || "Anonymous",
+            blobHash: "",
+            thumbnailUrl: params.thumbnailDataUrl || "",
+            durationSeconds: BigInt(Math.round(params.duration)),
+            fileSizeBytes: BigInt(params.file.size),
+            isPremium: false,
+          });
+          videoId = videoRecord.videoId;
+        } catch (e) {
+          console.warn(
+            "[upload] failed to register video in backend, using local id:",
+            e,
+          );
+          // Proceed with local uuid
+        }
 
-      setUploadTasks((prev) => {
-        const next = new Map(prev);
-        next.set(videoId, {
-          videoId,
-          progress: 0,
-          stage: "uploading",
-          statusMsg: "Preparing...",
+        const newVideo: Video = {
+          id: videoId,
+          title: params.title.trim(),
+          description: params.description.trim(),
+          creatorName: params.displayName || "Anonymous",
+          creatorId: params.userId || "anonymous",
+          blobHash: "",
+          thumbnailDataUrl: params.thumbnailDataUrl,
+          durationSeconds: Math.round(params.duration),
+          fileSizeBytes: params.file.size,
+          views: 0,
+          likes: 0,
+          dislikes: 0,
+          createdAt: Date.now(),
+          status: "uploading",
+          comments: [],
+        };
+
+        const existing = getVideos();
+        saveVideos([newVideo, ...existing]);
+        onVideoAddedRef.current(newVideo);
+
+        setUploadTasks((prev) => {
+          const next = new Map(prev);
+          next.set(videoId, {
+            videoId,
+            progress: 0,
+            stage: "uploading",
+            statusMsg: "Preparing...",
+          });
+          return next;
         });
-        return next;
-      });
 
-      uploadParamsRef.current.set(videoId, params);
+        uploadParamsRef.current.set(videoId, params);
 
-      // Persist to IDB for crash recovery
-      saveSession({
-        videoId,
-        file: params.file,
-        title: params.title,
-        description: params.description,
-        thumbnailDataUrl: params.thumbnailDataUrl,
-        duration: params.duration,
-        captions: params.captions,
-        userId: params.userId,
-        displayName: params.displayName,
-        lastChunkIndex: 0,
-        totalChunks,
-        createdAt: Date.now(),
-      });
+        // Persist to IDB for crash recovery
+        saveSession({
+          videoId,
+          file: params.file,
+          title: params.title,
+          description: params.description,
+          thumbnailDataUrl: params.thumbnailDataUrl,
+          duration: params.duration,
+          captions: params.captions,
+          userId: params.userId,
+          displayName: params.displayName,
+          lastChunkIndex: 0,
+          totalChunks,
+          createdAt: Date.now(),
+        });
 
-      runUpload(videoId, params, newVideo);
+        runUpload(videoId, params, newVideo);
+      })();
     },
     [runUpload],
   );

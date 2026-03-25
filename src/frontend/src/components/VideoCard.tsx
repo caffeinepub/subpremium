@@ -10,6 +10,7 @@ interface VideoCardProps {
   onClick: (video: Video) => void;
   index: number;
   watchedPercent?: number;
+  onCreatorClick?: (creatorId: string, creatorName: string) => void;
 }
 
 export function VideoCard({
@@ -17,6 +18,7 @@ export function VideoCard({
   onClick,
   index,
   watchedPercent = 0,
+  onCreatorClick,
 }: VideoCardProps) {
   return (
     <button
@@ -68,8 +70,23 @@ export function VideoCard({
           {video.title}
         </h3>
         <p className="text-xs text-muted-foreground mt-0.5">
-          {video.creatorName} &middot; {formatViewsShort(video.views)} views
-          &middot; {formatTimeAgo(video.createdAt)}
+          {onCreatorClick ? (
+            <button
+              type="button"
+              data-ocid="feed.creator.button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCreatorClick(video.creatorId, video.creatorName);
+              }}
+              className="text-muted-foreground hover:text-foreground hover:underline underline-offset-2 transition-colors"
+            >
+              {video.creatorName}
+            </button>
+          ) : (
+            video.creatorName
+          )}{" "}
+          &middot; {formatViewsShort(video.views)} views &middot;{" "}
+          {formatTimeAgo(video.createdAt)}
         </p>
       </div>
     </button>

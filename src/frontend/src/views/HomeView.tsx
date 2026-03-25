@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { FileVideo, Pause, Play, Upload, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { VideoCard } from "../components/VideoCard";
@@ -13,6 +14,8 @@ interface HomeViewProps {
   searchQuery: string;
   onVideoClick: (video: Video) => void;
   onUploadClick: () => void;
+  isLoadingVideos?: boolean;
+  onCreatorClick?: (creatorId: string, creatorName: string) => void;
 }
 
 export function HomeView({
@@ -20,6 +23,8 @@ export function HomeView({
   searchQuery,
   onVideoClick,
   onUploadClick,
+  isLoadingVideos = false,
+  onCreatorClick,
 }: HomeViewProps) {
   const { uploadTasks, cancelUpload, pauseUpload, resumeUpload } =
     useUploadManager();
@@ -50,6 +55,25 @@ export function HomeView({
   }, [readyVideos, searchQuery]);
 
   const allEmpty = pendingVideos.length === 0 && filteredReady.length === 0;
+
+  // Show loading skeletons while fetching from backend
+  if (isLoadingVideos && allEmpty) {
+    return (
+      <div className="animate-fade-in">
+        <div className="px-3 pt-3 pb-4">
+          <div data-ocid="feed.loading_state" className="flex flex-col gap-4">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="flex flex-col gap-2">
+                <Skeleton className="w-full aspect-video rounded-xl" />
+                <Skeleton className="w-3/4 h-4 rounded" />
+                <Skeleton className="w-1/2 h-3 rounded" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="animate-fade-in">
@@ -110,7 +134,6 @@ export function HomeView({
                   statusMsg?.includes("Resuming"));
               const isProcessing = stage === "processing";
 
-              // Derive display text — always from statusMsg or sensible default
               const displayText = statusMsg
                 ? statusMsg
                 : isProcessing
@@ -119,7 +142,6 @@ export function HomeView({
                     ? `Uploading... ${progress}% (slow network)`
                     : `Uploading... ${progress}%`;
 
-              // Badge color
               const badgeClass = isCancelled
                 ? "bg-red-500/90 text-white"
                 : isPaused
@@ -161,7 +183,6 @@ export function HomeView({
                         </div>
                       )}
 
-                      {/* Progress bar at bottom */}
                       {!isCancelled && (
                         <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-black/40">
                           <div
@@ -177,7 +198,6 @@ export function HomeView({
                         </div>
                       )}
 
-                      {/* Status badge */}
                       <div
                         className={`absolute top-2 left-2 text-xs px-2.5 py-1 rounded-full font-medium flex items-center gap-1.5 max-w-[70%] ${
                           badgeClass
@@ -189,10 +209,8 @@ export function HomeView({
                         <span className="truncate">{displayText}</span>
                       </div>
 
-                      {/* Action buttons — top right */}
                       {!isCancelled && !isConfirming && (
                         <div className="absolute top-2 right-2 flex gap-1">
-                          {/* Pause button — only when actively uploading */}
                           {!isPaused && !isProcessing && (
                             <Button
                               data-ocid={`feed.uploading.pause.${i + 1}`}
@@ -205,7 +223,6 @@ export function HomeView({
                             </Button>
                           )}
 
-                          {/* Resume button — only when paused */}
                           {isPaused && (
                             <Button
                               data-ocid={`feed.uploading.resume.${i + 1}`}
@@ -218,7 +235,6 @@ export function HomeView({
                             </Button>
                           )}
 
-                          {/* Cancel button — shows confirm dialog */}
                           <Button
                             data-ocid={`feed.uploading.cancel.${i + 1}`}
                             size="sm"
@@ -231,7 +247,6 @@ export function HomeView({
                         </div>
                       )}
 
-                      {/* Cancel confirmation overlay */}
                       {isConfirming && (
                         <div
                           data-ocid={`feed.uploading.dialog.${i + 1}`}
@@ -277,12 +292,10 @@ export function HomeView({
               );
             })}
 
-            {/* Divider between pending and ready */}
             {pendingVideos.length > 0 && filteredReady.length > 0 && (
               <Separator className="bg-border my-2" />
             )}
 
-            {/* Ready videos */}
             {filteredReady.map((video, i) => (
               <div key={video.id}>
                 {(i > 0 || pendingVideos.length > 0) && (
@@ -293,6 +306,7 @@ export function HomeView({
                   onClick={onVideoClick}
                   index={i + 1}
                   watchedPercent={getWatchedPercent(userId, video.id)}
+                  onCreatorClick={onCreatorClick}
                 />
               </div>
             ))}

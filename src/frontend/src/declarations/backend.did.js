@@ -19,10 +19,72 @@ export const _CaffeineStorageRefillResult = IDL.Record({
   'success' : IDL.Opt(IDL.Bool),
   'topped_up_amount' : IDL.Opt(IDL.Nat),
 });
+export const VideoInput = IDL.Record({
+  'title' : IDL.Text,
+  'thumbnailUrl' : IDL.Text,
+  'isPremium' : IDL.Bool,
+  'creatorId' : IDL.Text,
+  'fileSizeBytes' : IDL.Nat,
+  'description' : IDL.Text,
+  'creatorName' : IDL.Text,
+  'blobHash' : IDL.Text,
+  'durationSeconds' : IDL.Nat,
+});
+export const Comment = IDL.Record({
+  'commentId' : IDL.Text,
+  'authorId' : IDL.Text,
+  'createdAt' : IDL.Int,
+  'text' : IDL.Text,
+  'authorName' : IDL.Text,
+});
+export const VideoRecord = IDL.Record({
+  'status' : IDL.Text,
+  'title' : IDL.Text,
+  'thumbnailUrl' : IDL.Text,
+  'views' : IDL.Nat,
+  'isPremium' : IDL.Bool,
+  'createdAt' : IDL.Int,
+  'creatorId' : IDL.Text,
+  'fileSizeBytes' : IDL.Nat,
+  'description' : IDL.Text,
+  'likedBy' : IDL.Vec(IDL.Text),
+  'creatorName' : IDL.Text,
+  'blobHash' : IDL.Text,
+  'likes' : IDL.Nat,
+  'durationSeconds' : IDL.Nat,
+  'dislikedBy' : IDL.Vec(IDL.Text),
+  'comments' : IDL.Vec(Comment),
+  'dislikes' : IDL.Nat,
+  'videoUrl' : IDL.Text,
+  'videoId' : IDL.Text,
+});
 export const UserRole = IDL.Variant({
   'admin' : IDL.Null,
   'user' : IDL.Null,
   'guest' : IDL.Null,
+});
+export const UserProfile = IDL.Record({
+  'displayName' : IDL.Text,
+  'userId' : IDL.Text,
+  'email' : IDL.Text,
+});
+export const ProfileResult = IDL.Variant({
+  'ok' : UserProfile,
+  'err' : IDL.Text,
+});
+export const LoginResult = IDL.Variant({
+  'ok' : IDL.Record({
+    'token' : IDL.Text,
+    'displayName' : IDL.Text,
+    'userId' : IDL.Text,
+  }),
+  'err' : IDL.Text,
+});
+export const AuthResult = IDL.Variant({ 'ok' : IDL.Text, 'err' : IDL.Text });
+export const VideoUpdateInput = IDL.Record({
+  'status' : IDL.Text,
+  'videoUrl' : IDL.Text,
+  'videoId' : IDL.Text,
 });
 
 export const idlService = IDL.Service({
@@ -53,9 +115,30 @@ export const idlService = IDL.Service({
     ),
   '_caffeineStorageUpdateGatewayPrincipals' : IDL.Func([], [], []),
   '_initializeAccessControlWithSecret' : IDL.Func([IDL.Text], [], []),
+  'addComment' : IDL.Func([IDL.Text, IDL.Text], [IDL.Bool], []),
+  'addVideo' : IDL.Func([VideoInput], [VideoRecord], []),
   'assignCallerUserRole' : IDL.Func([IDL.Principal, UserRole], [], []),
+  'deleteVideo' : IDL.Func([IDL.Text], [IDL.Bool], []),
+  'getAllVideos' : IDL.Func([], [IDL.Vec(VideoRecord)], ['query']),
   'getCallerUserRole' : IDL.Func([], [UserRole], ['query']),
+  'getComments' : IDL.Func([IDL.Text], [IDL.Vec(Comment)], ['query']),
+  'getUserProfile' : IDL.Func([IDL.Text], [ProfileResult], []),
+  'getVideo' : IDL.Func([IDL.Text], [IDL.Opt(VideoRecord)], ['query']),
+  'getVideosByCreator' : IDL.Func(
+      [IDL.Text],
+      [IDL.Vec(VideoRecord)],
+      ['query'],
+    ),
+  'incrementViewCount' : IDL.Func([IDL.Text], [IDL.Bool], []),
   'isCallerAdmin' : IDL.Func([], [IDL.Bool], ['query']),
+  'loginUser' : IDL.Func([IDL.Text, IDL.Text], [LoginResult], []),
+  'logoutUser' : IDL.Func([IDL.Text], [], []),
+  'registerUser' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [AuthResult], []),
+  'searchVideos' : IDL.Func([IDL.Text], [IDL.Vec(VideoRecord)], ['query']),
+  'toggleDislike' : IDL.Func([IDL.Text], [IDL.Bool], []),
+  'toggleLike' : IDL.Func([IDL.Text], [IDL.Bool], []),
+  'updateVideoStatus' : IDL.Func([VideoUpdateInput], [IDL.Bool], []),
+  'validateSession' : IDL.Func([IDL.Text], [ProfileResult], []),
 });
 
 export const idlInitArgs = [];
@@ -72,10 +155,69 @@ export const idlFactory = ({ IDL }) => {
     'success' : IDL.Opt(IDL.Bool),
     'topped_up_amount' : IDL.Opt(IDL.Nat),
   });
+  const VideoInput = IDL.Record({
+    'title' : IDL.Text,
+    'thumbnailUrl' : IDL.Text,
+    'isPremium' : IDL.Bool,
+    'creatorId' : IDL.Text,
+    'fileSizeBytes' : IDL.Nat,
+    'description' : IDL.Text,
+    'creatorName' : IDL.Text,
+    'blobHash' : IDL.Text,
+    'durationSeconds' : IDL.Nat,
+  });
+  const Comment = IDL.Record({
+    'commentId' : IDL.Text,
+    'authorId' : IDL.Text,
+    'createdAt' : IDL.Int,
+    'text' : IDL.Text,
+    'authorName' : IDL.Text,
+  });
+  const VideoRecord = IDL.Record({
+    'status' : IDL.Text,
+    'title' : IDL.Text,
+    'thumbnailUrl' : IDL.Text,
+    'views' : IDL.Nat,
+    'isPremium' : IDL.Bool,
+    'createdAt' : IDL.Int,
+    'creatorId' : IDL.Text,
+    'fileSizeBytes' : IDL.Nat,
+    'description' : IDL.Text,
+    'likedBy' : IDL.Vec(IDL.Text),
+    'creatorName' : IDL.Text,
+    'blobHash' : IDL.Text,
+    'likes' : IDL.Nat,
+    'durationSeconds' : IDL.Nat,
+    'dislikedBy' : IDL.Vec(IDL.Text),
+    'comments' : IDL.Vec(Comment),
+    'dislikes' : IDL.Nat,
+    'videoUrl' : IDL.Text,
+    'videoId' : IDL.Text,
+  });
   const UserRole = IDL.Variant({
     'admin' : IDL.Null,
     'user' : IDL.Null,
     'guest' : IDL.Null,
+  });
+  const UserProfile = IDL.Record({
+    'displayName' : IDL.Text,
+    'userId' : IDL.Text,
+    'email' : IDL.Text,
+  });
+  const ProfileResult = IDL.Variant({ 'ok' : UserProfile, 'err' : IDL.Text });
+  const LoginResult = IDL.Variant({
+    'ok' : IDL.Record({
+      'token' : IDL.Text,
+      'displayName' : IDL.Text,
+      'userId' : IDL.Text,
+    }),
+    'err' : IDL.Text,
+  });
+  const AuthResult = IDL.Variant({ 'ok' : IDL.Text, 'err' : IDL.Text });
+  const VideoUpdateInput = IDL.Record({
+    'status' : IDL.Text,
+    'videoUrl' : IDL.Text,
+    'videoId' : IDL.Text,
   });
   
   return IDL.Service({
@@ -106,9 +248,30 @@ export const idlFactory = ({ IDL }) => {
       ),
     '_caffeineStorageUpdateGatewayPrincipals' : IDL.Func([], [], []),
     '_initializeAccessControlWithSecret' : IDL.Func([IDL.Text], [], []),
+    'addComment' : IDL.Func([IDL.Text, IDL.Text], [IDL.Bool], []),
+    'addVideo' : IDL.Func([VideoInput], [VideoRecord], []),
     'assignCallerUserRole' : IDL.Func([IDL.Principal, UserRole], [], []),
+    'deleteVideo' : IDL.Func([IDL.Text], [IDL.Bool], []),
+    'getAllVideos' : IDL.Func([], [IDL.Vec(VideoRecord)], ['query']),
     'getCallerUserRole' : IDL.Func([], [UserRole], ['query']),
+    'getComments' : IDL.Func([IDL.Text], [IDL.Vec(Comment)], ['query']),
+    'getUserProfile' : IDL.Func([IDL.Text], [ProfileResult], []),
+    'getVideo' : IDL.Func([IDL.Text], [IDL.Opt(VideoRecord)], ['query']),
+    'getVideosByCreator' : IDL.Func(
+        [IDL.Text],
+        [IDL.Vec(VideoRecord)],
+        ['query'],
+      ),
+    'incrementViewCount' : IDL.Func([IDL.Text], [IDL.Bool], []),
     'isCallerAdmin' : IDL.Func([], [IDL.Bool], ['query']),
+    'loginUser' : IDL.Func([IDL.Text, IDL.Text], [LoginResult], []),
+    'logoutUser' : IDL.Func([IDL.Text], [], []),
+    'registerUser' : IDL.Func([IDL.Text, IDL.Text, IDL.Text], [AuthResult], []),
+    'searchVideos' : IDL.Func([IDL.Text], [IDL.Vec(VideoRecord)], ['query']),
+    'toggleDislike' : IDL.Func([IDL.Text], [IDL.Bool], []),
+    'toggleLike' : IDL.Func([IDL.Text], [IDL.Bool], []),
+    'updateVideoStatus' : IDL.Func([VideoUpdateInput], [IDL.Bool], []),
+    'validateSession' : IDL.Func([IDL.Text], [ProfileResult], []),
   });
 };
 

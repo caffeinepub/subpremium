@@ -15,6 +15,8 @@ export interface UserSettings {
   allowDownloads: boolean;
   autoplayVideos: boolean;
   videoQuality: "auto" | "720p" | "1080p";
+  videoQualityWifi: "auto" | "higher" | "datasaver";
+  videoQualityMobile: "auto" | "higher" | "datasaver";
   subtitlesLanguage: string;
   appLanguage: string;
   subtitleDefaultLanguage: string;
@@ -28,6 +30,8 @@ const DEFAULT_SETTINGS: UserSettings = {
   allowDownloads: true,
   autoplayVideos: true,
   videoQuality: "auto",
+  videoQualityWifi: "auto",
+  videoQualityMobile: "auto",
   subtitlesLanguage: "none",
   appLanguage: "English",
   subtitleDefaultLanguage: "none",

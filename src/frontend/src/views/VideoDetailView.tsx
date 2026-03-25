@@ -30,9 +30,11 @@ import { useActor } from "../hooks/useActor";
 import { useAuth } from "../hooks/useAuth";
 import { useInternetIdentity } from "../hooks/useInternetIdentity";
 import { addNotification } from "../hooks/useNotifications";
+import { useSettings } from "../hooks/useSettings";
 import type { Comment, Video } from "../types/video";
 import { StorageClient } from "../utils/StorageClient";
 import { formatTimeAgo, formatViewsShort } from "../utils/format";
+import { detectNetworkType } from "../utils/networkQuality";
 import {
   addToHistory,
   incrementViews,
@@ -52,6 +54,7 @@ interface VideoDetailViewProps {
   onLoginClick: () => void;
   allVideos?: Video[];
   onVideoSelect?: (video: Video) => void;
+  onCreatorClick?: (creatorId: string, creatorName: string) => void;
 }
 
 type CueLine = { start: number; end: number; text: string };
@@ -64,7 +67,7 @@ function parseSRT(text: string): CueLine[] {
     if (lines.length < 3) return [];
     const timeLine = lines[1];
     const match = timeLine.match(
-      /(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/,
+      /(\d+):(\d+):(\d+)[,.]( \d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)/,
     );
     if (!match) return [];
     const toSec = (h: string, m: string, s: string, ms: string) =>
@@ -119,13 +122,15 @@ export function VideoDetailView({
   onLoginClick,
   allVideos = [],
   onVideoSelect,
+  onCreatorClick,
 }: VideoDetailViewProps) {
   const { user } = useAuth();
   const isLoggedIn = !!user;
   const userId = user?.userId ?? "";
 
   const { identity } = useInternetIdentity();
-  const { isFetching } = useActor();
+  const { settings } = useSettings();
+  const { actor, isFetching } = useActor();
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -174,6 +179,27 @@ export function VideoDetailView({
     setVideoError(false);
 
     async function loadUrl() {
+      // If the video already has a direct URL source from the backend, use it
+      const directSource = currentVideo.sources?.find(
+        (s) => s.quality === "Auto" && s.url,
+      );
+      if (directSource?.url) {
+        if (!cancelled) {
+          setVideoUrl(directSource.url);
+          setLoadingVideo(false);
+        }
+        return;
+      }
+
+      // Fall back to resolving via blobHash
+      if (!currentVideo.blobHash) {
+        if (!cancelled) {
+          setVideoError(true);
+          setLoadingVideo(false);
+        }
+        return;
+      }
+
       try {
         const config = await loadConfig();
         const agentOptions: Record<string, unknown> = {
@@ -207,9 +233,9 @@ export function VideoDetailView({
     return () => {
       cancelled = true;
     };
-  }, [currentVideo.blobHash, identity, isFetching]);
+  }, [currentVideo.blobHash, currentVideo.sources, identity, isFetching]);
 
-  // Track history and views once on mount
+  // Track history, views, and increment backend view count once on mount
   useEffect(() => {
     if (mountedRef.current) return;
     mountedRef.current = true;
@@ -218,7 +244,16 @@ export function VideoDetailView({
     const updated = { ...video, views: video.views + 1 };
     setCurrentVideo(updated);
     onVideoUpdate(updated);
-  }, [video, onVideoUpdate]);
+
+    // Increment view in backend (fire-and-forget)
+    if (actor) {
+      actor
+        .incrementViewCount(video.id)
+        .catch((e) =>
+          console.warn("[view] failed to increment view count:", e),
+        );
+    }
+  }, [video, onVideoUpdate, actor]);
 
   // Apply playback rate
   useEffect(() => {
@@ -369,10 +404,42 @@ export function VideoDetailView({
     [],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentional mount-only effect
+  useEffect(() => {
+    if (!currentVideo.sources || currentVideo.sources.length === 0) return;
+    const networkType = detectNetworkType();
+    let preference: "auto" | "higher" | "datasaver";
+    if (networkType === "mobile") {
+      preference = settings.videoQualityMobile;
+    } else {
+      preference = settings.videoQualityWifi;
+    }
+    if (preference === "auto") return;
+    if (preference === "higher") {
+      applyQualityMode("higher");
+    } else if (preference === "datasaver") {
+      applyQualityMode("datasaver");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Re-load URL when quality changes
   useEffect(() => {
     if (!hasSources) return;
     let cancelled = false;
+
+    // If we already have a direct URL, use it
+    const directSource = currentVideo.sources?.find(
+      (s) => s.quality === "Auto" && s.url,
+    );
+    if (directSource?.url) {
+      setVideoUrl(directSource.url);
+      setLoadingVideo(false);
+      return;
+    }
+
+    if (!currentVideo.blobHash) return;
+
     async function reload() {
       try {
         const config = await loadConfig();
@@ -407,7 +474,7 @@ export function VideoDetailView({
     return () => {
       cancelled = true;
     };
-  }, [hasSources, currentVideo.blobHash, identity]);
+  }, [hasSources, currentVideo.blobHash, currentVideo.sources, identity]);
 
   const handleSubscribe = useCallback(() => {
     const next = !subscribed;
@@ -438,6 +505,14 @@ export function VideoDetailView({
     setCurrentVideo(updated);
     updateVideo(updated);
     onVideoUpdate(updated);
+
+    // Backend call (fire-and-forget)
+    if (actor) {
+      actor
+        .toggleLike(currentVideo.id)
+        .catch((e) => console.warn("[like] backend call failed:", e));
+    }
+
     if (
       !hasLiked &&
       userId !== currentVideo.creatorId &&
@@ -446,11 +521,13 @@ export function VideoDetailView({
       addNotification(currentVideo.creatorId, {
         type: "like",
         title: "New like",
-        message: `${user?.displayName || user?.email || "Someone"} liked your video: "${currentVideo.title}"`,
+        message: `${
+          user?.displayName || user?.email || "Someone"
+        } liked your video: "${currentVideo.title}"`,
         videoId: currentVideo.id,
       });
     }
-  }, [currentVideo, isLoggedIn, userId, user, onVideoUpdate]);
+  }, [currentVideo, isLoggedIn, userId, user, onVideoUpdate, actor]);
 
   const handleDislike = useCallback(() => {
     if (!isLoggedIn || !userId) return;
@@ -473,7 +550,14 @@ export function VideoDetailView({
     setCurrentVideo(updated);
     updateVideo(updated);
     onVideoUpdate(updated);
-  }, [currentVideo, isLoggedIn, userId, onVideoUpdate]);
+
+    // Backend call (fire-and-forget)
+    if (actor) {
+      actor
+        .toggleDislike(currentVideo.id)
+        .catch((e) => console.warn("[dislike] backend call failed:", e));
+    }
+  }, [currentVideo, isLoggedIn, userId, onVideoUpdate, actor]);
 
   const handleShare = useCallback(() => {
     const url = `${window.location.origin}?v=${currentVideo.id}`;
@@ -501,6 +585,14 @@ export function VideoDetailView({
     updateVideo(updated);
     onVideoUpdate(updated);
     setCommentText("");
+
+    // Backend call (fire-and-forget)
+    if (actor) {
+      actor
+        .addComment(currentVideo.id, comment.text)
+        .catch((e) => console.warn("[comment] backend call failed:", e));
+    }
+
     if (
       user &&
       user.userId !== currentVideo.creatorId &&
@@ -509,11 +601,13 @@ export function VideoDetailView({
       addNotification(currentVideo.creatorId, {
         type: "comment",
         title: "New comment",
-        message: `${user.displayName || user.email || "Someone"} commented on your video: "${currentVideo.title}"`,
+        message: `${
+          user.displayName || user.email || "Someone"
+        } commented on your video: "${currentVideo.title}"`,
         videoId: currentVideo.id,
       });
     }
-  }, [commentText, isLoggedIn, user, currentVideo, onVideoUpdate]);
+  }, [commentText, isLoggedIn, user, currentVideo, onVideoUpdate, actor]);
 
   const hasLiked = (currentVideo.likedBy ?? []).includes(userId);
   const hasDisliked = (currentVideo.dislikedBy ?? []).includes(userId);
@@ -669,7 +763,9 @@ export function VideoDetailView({
                     stroke="white"
                     strokeWidth="4"
                     strokeDasharray={`${2 * Math.PI * 28}`}
-                    strokeDashoffset={`${2 * Math.PI * 28 * (1 - autoplayCountdown / 5)}`}
+                    strokeDashoffset={`${
+                      2 * Math.PI * 28 * (1 - autoplayCountdown / 5)
+                    }`}
                     strokeLinecap="round"
                     style={{ transition: "stroke-dashoffset 0.9s linear" }}
                   />
@@ -930,14 +1026,29 @@ export function VideoDetailView({
 
         {/* Channel row */}
         <div className="flex items-center gap-3 mt-3">
-          <div className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center shrink-0">
+          <button
+            type="button"
+            data-ocid="video.creator.button"
+            onClick={() =>
+              onCreatorClick?.(currentVideo.creatorId, currentVideo.creatorName)
+            }
+            className="w-9 h-9 rounded-full bg-secondary flex items-center justify-center shrink-0 hover:ring-2 hover:ring-primary/40 transition-all"
+            aria-label={`View ${currentVideo.creatorName}'s profile`}
+          >
             <span className="text-xs font-bold">
               {currentVideo.creatorName.slice(0, 2).toUpperCase()}
             </span>
-          </div>
-          <span className="text-sm font-semibold flex-1 truncate">
+          </button>
+          <button
+            type="button"
+            data-ocid="video.creator.link"
+            onClick={() =>
+              onCreatorClick?.(currentVideo.creatorId, currentVideo.creatorName)
+            }
+            className="text-sm font-semibold flex-1 truncate text-left hover:text-primary transition-colors"
+          >
             {currentVideo.creatorName}
-          </span>
+          </button>
           <Button
             data-ocid="video.subscribe.button"
             type="button"
@@ -1096,9 +1207,17 @@ export function VideoDetailView({
                     <p className="text-sm font-medium text-foreground line-clamp-2 leading-snug">
                       {v.title}
                     </p>
-                    <p className="text-xs text-muted-foreground mt-1">
+                    <button
+                      type="button"
+                      data-ocid="video.suggestions.creator.button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onCreatorClick?.(v.creatorId, v.creatorName);
+                      }}
+                      className="text-xs text-muted-foreground mt-1 hover:text-primary hover:underline underline-offset-2 transition-colors text-left"
+                    >
                       {v.creatorName}
-                    </p>
+                    </button>
                     <p className="text-xs text-muted-foreground">
                       {formatViewsShort(v.views)} views
                     </p>

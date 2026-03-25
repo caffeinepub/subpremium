@@ -40,4 +40,5 @@ export type ViewName =
   | "privacy"
   | "preferences"
   | "language"
-  | "display";
+  | "display"
+  | "profile";
