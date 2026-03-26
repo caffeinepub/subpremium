@@ -1,6 +1,6 @@
 const DB_NAME = "upload-sessions";
 const STORE_NAME = "sessions";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export interface PersistedSession {
   videoId: string;
@@ -12,9 +12,13 @@ export interface PersistedSession {
   captions: Array<{ lang: string; file: File }>;
   userId: string;
   displayName: string;
+  /** Actual chunk index of the last successfully uploaded chunk (-1 = none yet). */
   lastChunkIndex: number;
   totalChunks: number;
   createdAt: number;
+  /** Serialised BlobHashTree JSON — stored after first tree build so resume
+   *  can skip re-hashing the entire file. */
+  blobHashTreeJSON?: string;
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -49,9 +53,11 @@ export async function saveSession(session: PersistedSession): Promise<void> {
   }
 }
 
+/** Update the last completed chunk index AND optionally the stored tree JSON. */
 export async function updateChunkIndex(
   videoId: string,
   chunkIndex: number,
+  blobHashTreeJSON?: string,
 ): Promise<void> {
   try {
     const db = await openDB();
@@ -66,6 +72,9 @@ export async function updateChunkIndex(
           return;
         }
         record.lastChunkIndex = chunkIndex;
+        if (blobHashTreeJSON !== undefined) {
+          record.blobHashTreeJSON = blobHashTreeJSON;
+        }
         const putReq = store.put(record);
         putReq.onsuccess = () => resolve();
         putReq.onerror = () => reject(putReq.error);
