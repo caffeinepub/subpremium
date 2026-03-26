@@ -88,7 +88,9 @@ export function HomeView({
             </div>
             <div>
               <p className="text-base font-semibold text-foreground">
-                {searchQuery ? "No videos found" : "No videos yet"}
+                {searchQuery
+                  ? "No videos found"
+                  : "No videos yet \u2014 upload your first video"}
               </p>
               <p className="text-sm text-muted-foreground mt-1">
                 {searchQuery

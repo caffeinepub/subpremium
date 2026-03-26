@@ -236,7 +236,7 @@ function nodeToJSON(node: TreeNode): TreeNodeJSON {
   };
 }
 
-export type BlobHashTreeJSON = {
+type BlobHashTreeJSON = {
   tree_type: "DSBMTWH";
   chunk_hashes: string[];
   tree: TreeNodeJSON;
@@ -334,22 +334,26 @@ class BlobHashTree {
     return new BlobHashTree(chunkHashes, chunksRoot, headers);
   }
 
-  /** Reconstruct a BlobHashTree from its serialised JSON (for resume after page reload). */
   public static fromJSON(json: BlobHashTreeJSON): BlobHashTree {
-    const chunkHashes = json.chunk_hashes.map((h) =>
-      YHash.fromHex(h.replace(`${SHA256_PREFIX}`, "")),
-    );
+    const chunkHashes = json.chunk_hashes.map((h) => {
+      const hex = h.startsWith(SHA256_PREFIX)
+        ? h.slice(SHA256_PREFIX.length)
+        : h;
+      return YHash.fromHex(hex);
+    });
 
     function nodeFromJSON(n: TreeNodeJSON): TreeNode {
+      const hex = n.hash.startsWith(SHA256_PREFIX)
+        ? n.hash.slice(SHA256_PREFIX.length)
+        : n.hash;
       return {
-        hash: YHash.fromHex(n.hash.replace(`${SHA256_PREFIX}`, "")),
+        hash: YHash.fromHex(hex),
         left: n.left ? nodeFromJSON(n.left) : null,
         right: n.right ? nodeFromJSON(n.right) : null,
       };
     }
 
-    const tree = nodeFromJSON(json.tree);
-    return new BlobHashTree(chunkHashes, tree, json.headers);
+    return new BlobHashTree(chunkHashes, nodeFromJSON(json.tree), json.headers);
   }
 
   public toJSON(): BlobHashTreeJSON {
@@ -556,74 +560,63 @@ export class StorageClient {
     return { hash: hashString };
   }
 
-  /**
-   * Memory-safe streaming upload for large files (540MB+, 1h+ videos).
-   *
-   * - Chunks via file.slice() — never loads the full file into memory.
-   * - Uploads sequentially so we can track the exact chunk index for resume.
-   * - On page reload, pass resumeState to skip already-uploaded chunks.
-   * - onChunkComplete(-1, treeJSON) is called once after the tree is built (save to IDB).
-   * - onChunkComplete(i) is called after each chunk upload (update IDB progress).
-   */
+  public async getDirectURL(hash: string): Promise<string> {
+    if (!hash) {
+      throw new Error("Hash must not be empty");
+    }
+    validateHashFormat(hash, `getDirectURL for path '${hash}'`);
+    return `${this.storageGatewayClient.getStorageGatewayUrl()}/${GATEWAY_VERSION}/blob/?blob_hash=${encodeURIComponent(hash)}&owner_id=${encodeURIComponent(this.backendCanisterId)}&project_id=${encodeURIComponent(this.projectId)}`;
+  }
+
   public async putBlob(
     file: File,
-    onProgress?: (percentage: number) => void,
-    signal?: AbortSignal,
+    onProgress: (pct: number) => void,
+    signal: AbortSignal,
     resumeState?: { fromChunk: number; treeJSON: BlobHashTreeJSON },
-    onChunkComplete?: (chunkIndex: number, treeJSON?: BlobHashTreeJSON) => void,
+    onChunkComplete?: (
+      chunkIndex: number,
+      treeJSON?: BlobHashTreeJSON,
+    ) => Promise<void>,
   ): Promise<{ hash: string }> {
-    const chunkSize = 1024 * 1024; // 1 MB
-    const totalChunks = Math.ceil(file.size / chunkSize) || 1;
-
-    const httpHeaders: Headers = {
-      "Content-Type": "application/octet-stream",
-    };
-    const fileHeaders: Headers = {
-      "Content-Type": "application/octet-stream",
-      "Content-Length": file.size.toString(),
-    };
+    const CHUNK_SIZE = 1024 * 1024; // 1 MB
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
+    const httpHeaders: Headers = { "Content-Type": "application/json" };
 
     let blobHashTree: BlobHashTree;
-    let startChunk: number;
+    let blobRootHash: YHash;
 
-    if (resumeState && resumeState.fromChunk > 0) {
-      // Resume: reconstruct tree from stored JSON — no re-hashing needed
+    if (resumeState?.treeJSON) {
+      // Restore from saved tree JSON — skip re-hashing and re-uploading tree
       blobHashTree = BlobHashTree.fromJSON(resumeState.treeJSON);
-      startChunk = resumeState.fromChunk;
-
-      // Report initial progress based on already-uploaded chunks
-      const initialPct = Math.round((startChunk / totalChunks) * 100);
-      onProgress?.(Math.max(1, initialPct));
+      blobRootHash = blobHashTree.tree.hash;
     } else {
-      // Fresh upload: hash all chunks sequentially (memory-safe: one chunk at a time)
+      // Build tree fresh
+      const fileHeaders: Headers = {
+        "Content-Type": file.type || "application/octet-stream",
+        "Content-Length": file.size.toString(),
+      };
       const chunkHashes: YHash[] = [];
       for (let i = 0; i < totalChunks; i++) {
-        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-        const start = i * chunkSize;
-        const end = Math.min(start + chunkSize, file.size);
+        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
         const chunkData = new Uint8Array(
           await file.slice(start, end).arrayBuffer(),
         );
-        const hash = await YHash.fromChunk(chunkData);
-        chunkHashes.push(hash);
-        // chunkData released after this point
+        chunkHashes.push(await YHash.fromChunk(chunkData));
       }
 
       blobHashTree = await BlobHashTree.build(chunkHashes, fileHeaders);
-      startChunk = 0;
+      blobRootHash = blobHashTree.tree.hash;
+      const hashString = blobRootHash.toShaString();
 
-      // Save tree JSON to IDB BEFORE uploading any chunk — critical for resume
-      const treeJSON = blobHashTree.toJSON();
-      await onChunkComplete?.(-1, treeJSON);
-    }
+      // Persist tree JSON so resume can skip this step
+      if (onChunkComplete) {
+        await onChunkComplete(-1, blobHashTree.toJSON());
+      }
 
-    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 
-    const blobRootHash = blobHashTree.tree.hash;
-    const hashString = blobRootHash.toShaString();
-
-    // Only register the blob tree with the server on fresh uploads (not resumes)
-    if (startChunk === 0) {
       const certificateBytes = await this.getCertificate(hashString);
       await this.storageGatewayClient.uploadBlobTree(
         blobHashTree,
@@ -635,15 +628,14 @@ export class StorageClient {
       );
     }
 
-    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const hashString = blobRootHash.toShaString();
+    const fromChunk = resumeState?.fromChunk ?? 0;
 
-    // Upload chunks sequentially (one at a time) so we can track exact position
-    for (let i = startChunk; i < totalChunks; i++) {
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    for (let i = fromChunk; i < totalChunks; i++) {
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 
-      const start = i * chunkSize;
-      const end = Math.min(start + chunkSize, file.size);
-      // Read exactly one chunk — released after upload
+      const start = i * CHUNK_SIZE;
+      const end = Math.min(start + CHUNK_SIZE, file.size);
       const chunkData = new Uint8Array(
         await file.slice(start, end).arrayBuffer(),
       );
@@ -660,23 +652,17 @@ export class StorageClient {
         httpHeaders,
       });
 
-      // Report progress after each chunk
-      const pct = Math.round(((i + 1) / totalChunks) * 100);
-      onProgress?.(pct);
+      if (onChunkComplete) {
+        await onChunkComplete(i);
+      }
 
-      // Persist chunk index to IDB so we can resume if the page reloads
-      await onChunkComplete?.(i);
+      const pct = Math.round(((i + 1) / totalChunks) * 100);
+      onProgress(pct);
+
+      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
     }
 
     return { hash: hashString };
-  }
-
-  public async getDirectURL(hash: string): Promise<string> {
-    if (!hash) {
-      throw new Error("Hash must not be empty");
-    }
-    validateHashFormat(hash, `getDirectURL for path '${hash}'`);
-    return `${this.storageGatewayClient.getStorageGatewayUrl()}/${GATEWAY_VERSION}/blob/?blob_hash=${encodeURIComponent(hash)}&owner_id=${encodeURIComponent(this.backendCanisterId)}&project_id=${encodeURIComponent(this.projectId)}`;
   }
 
   private async processFileForUpload(

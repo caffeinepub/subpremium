@@ -19,6 +19,7 @@ import {
 } from "./hooks/useSettings";
 import { UploadManagerProvider } from "./hooks/useUploadManager";
 import type { Video, ViewName } from "./types/video";
+import { clearDemoCache } from "./utils/clearDemoCache";
 import { getVideos } from "./utils/videoStorage";
 import { CreatorDashboardView } from "./views/CreatorDashboardView";
 import { CreatorProfileView } from "./views/CreatorProfileView";
@@ -146,6 +147,11 @@ function NotificationPopup({
 }
 
 function AppInner() {
+  // Clear demo/seed cache on first mount
+  useEffect(() => {
+    clearDemoCache();
+  }, []);
+
   const [currentView, setCurrentView] = useState<ViewName>(() => {
     try {
       const saved = localStorage.getItem(
