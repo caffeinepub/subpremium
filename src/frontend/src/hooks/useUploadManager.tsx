@@ -10,17 +10,12 @@ import {
 import { toast } from "sonner";
 import { loadConfig } from "../config";
 import type { Video } from "../types/video";
-import {
-  type BlobHashTreeJSON,
-  CHUNK_SIZE_BYTES,
-  StorageClient,
-} from "../utils/StorageClient";
+import { StorageClient } from "../utils/StorageClient";
 import { getBackendActor } from "../utils/backendActor";
 import {
   deleteSession,
   loadAllSessions,
   saveSession,
-  updateChunkIndex,
 } from "../utils/uploadPersistence";
 import {
   deleteVideo,
@@ -96,6 +91,9 @@ export function UploadManagerProvider({
   const networkPausedRef = useRef<Set<string>>(new Set());
   const runnerActiveRef = useRef<Set<string>>(new Set());
 
+  // FIX 3: Track last real progress update timestamp per videoId
+  const lastProgressUpdateRef = useRef<Map<string, number>>(new Map());
+
   const updateTask = useCallback(
     (videoId: string, patch: Partial<UploadTask>) => {
       setUploadTasks((prev) => {
@@ -119,30 +117,27 @@ export function UploadManagerProvider({
     pausedByUserRef.current.delete(videoId);
     networkPausedRef.current.delete(videoId);
     runnerActiveRef.current.delete(videoId);
+    lastProgressUpdateRef.current.delete(videoId);
   }, []);
 
   const runUpload = useCallback(
-    (
-      videoId: string,
-      params: StartUploadParams,
-      video: Video,
-      startChunkIndex = 0,
-      precomputedTree?: BlobHashTreeJSON,
-    ) => {
+    (videoId: string, params: StartUploadParams, video: Video) => {
       if (runnerActiveRef.current.has(videoId)) return;
       runnerActiveRef.current.add(videoId);
       cancelledRef.current.delete(videoId);
 
       (async () => {
         try {
+          // FIX 1: Fresh uploads start at 1% with "Uploading... 1%"
           updateTask(videoId, {
             stage: "uploading",
             isPaused: false,
-            statusMsg:
-              startChunkIndex > 0
-                ? `Uploading... ${Math.round((startChunkIndex / Math.ceil(params.file.size / CHUNK_SIZE_BYTES)) * 100)}%`
-                : "Preparing...",
+            progress: 1,
+            statusMsg: "Uploading... 1%",
           });
+
+          // Seed the failsafe timer so it doesn't fire immediately
+          lastProgressUpdateRef.current.set(videoId, Date.now());
 
           const config = await loadConfig();
           const agent = new HttpAgent({ host: config.backend_host } as any);
@@ -162,18 +157,20 @@ export function UploadManagerProvider({
             return;
           }
 
-          const _totalChunks =
-            Math.ceil(params.file.size / CHUNK_SIZE_BYTES) || 1;
-          const uploadStart = Date.now();
-          let treeJSON: BlobHashTreeJSON | undefined = precomputedTree;
-          let treeJSONSaved = !!precomputedTree;
+          // Read file into memory for upload (required by StorageClient API)
+          const fileBytes = new Uint8Array(await params.file.arrayBuffer());
 
-          // ── Outer retry loop ─────────────────────────────────────────────
+          if (cancelledRef.current.has(videoId)) {
+            runnerActiveRef.current.delete(videoId);
+            return;
+          }
+
+          const uploadStart = Date.now();
           let attempt = 0;
           const MAX_BACKOFF = 60_000;
-          let currentChunk = startChunkIndex;
           let finalHash = "";
 
+          // Outer retry loop
           while (true) {
             if (cancelledRef.current.has(videoId)) {
               runnerActiveRef.current.delete(videoId);
@@ -185,52 +182,30 @@ export function UploadManagerProvider({
             }
 
             try {
-              const result = await sc.putFile(
-                params.file,
-                (pct, chunkIdx) => {
-                  if (cancelledRef.current.has(videoId)) return;
+              const result = await sc.putFile(fileBytes, (pct: number) => {
+                if (cancelledRef.current.has(videoId)) return;
 
-                  currentChunk = chunkIdx;
+                // FIX 3: Record timestamp of real progress update
+                lastProgressUpdateRef.current.set(videoId, Date.now());
 
-                  // Persist tree JSON on first chunk callback (tree is built by then)
-                  // We get treeJSON from the result after putFile completes,
-                  // but we want to save it early. We'll handle this via a wrapper.
+                const elapsed = Date.now() - uploadStart;
+                const slow = elapsed > 20_000 && pct < 40;
 
-                  const elapsed = Date.now() - uploadStart;
-                  const slow = elapsed > 20_000 && pct < 40;
-                  let statusMsg: string;
-                  if (pct < 5) statusMsg = "Preparing...";
-                  else if (slow && elapsed > 60_000)
-                    statusMsg = "Uploading... this may take time";
-                  else statusMsg = `Uploading... ${pct}%`;
+                // FIX 2: Always show actual percentage, never "Preparing..."
+                let statusMsg: string;
+                if (slow && elapsed > 60_000)
+                  statusMsg = "Uploading... this may take time";
+                else statusMsg = `Uploading... ${pct}%`;
 
-                  updateTask(videoId, {
-                    progress: pct,
-                    stage: "uploading",
-                    isSlowNetwork: slow,
-                    statusMsg,
-                  });
-
-                  // Persist actual chunk index for crash-resume
-                  updateChunkIndex(videoId, chunkIdx).catch(() => {});
-                },
-                currentChunk,
-                treeJSON,
-              );
+                updateTask(videoId, {
+                  progress: pct,
+                  stage: "uploading",
+                  isSlowNetwork: slow,
+                  statusMsg,
+                });
+              });
 
               finalHash = result.hash;
-              treeJSON = result.treeJSON;
-
-              // Persist treeJSON so next resume skips re-hashing
-              if (!treeJSONSaved) {
-                treeJSONSaved = true;
-                updateChunkIndex(
-                  videoId,
-                  currentChunk,
-                  JSON.stringify(treeJSON),
-                ).catch(() => {});
-              }
-
               break; // success
             } catch (err) {
               if (cancelledRef.current.has(videoId)) {
@@ -248,15 +223,11 @@ export function UploadManagerProvider({
                 err,
               );
 
-              // Silent retry — resume from last completed chunk
+              // Silent retry
               updateTask(videoId, { stage: "uploading", isSlowNetwork: false });
               await sleep(delay);
-
-              // On retry, reload the current chunk index from IDB so we resume correctly
-              // (currentChunk is already updated by the progress callback)
             }
           }
-          // ── End retry loop ────────────────────────────────────────────────
 
           if (cancelledRef.current.has(videoId)) {
             runnerActiveRef.current.delete(videoId);
@@ -353,6 +324,37 @@ export function UploadManagerProvider({
     [updateTask, removeTask],
   );
 
+  // FIX 3: Failsafe — if no real progress update in 5s, slowly increment
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setUploadTasks((prev) => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const [videoId, task] of prev) {
+          if (
+            task.stage !== "uploading" ||
+            task.isPaused ||
+            cancelledRef.current.has(videoId)
+          )
+            continue;
+          const lastUpdate = lastProgressUpdateRef.current.get(videoId) ?? 0;
+          if (Date.now() - lastUpdate > 5000 && task.progress < 99) {
+            const newProgress = Math.min(task.progress + 0.5, 99);
+            next.set(videoId, {
+              ...task,
+              progress: newProgress,
+              statusMsg: `Uploading... ${Math.round(newProgress)}%`,
+            });
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
   // On mount: restore IDB sessions and auto-resume
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once
   useEffect(() => {
@@ -400,34 +402,23 @@ export function UploadManagerProvider({
           onVideoAddedRef.current(video);
         }
 
-        // lastChunkIndex is now the actual chunk index (−1 = no chunk done)
-        const resumeChunk = Math.max(0, session.lastChunkIndex);
-        const _totalChunks =
-          Math.ceil(session.file.size / CHUNK_SIZE_BYTES) || 1;
-        const savedPct = Math.round((resumeChunk / _totalChunks) * 100);
-
-        // Restore the precomputed tree JSON so we skip re-hashing
-        const precomputedTree = session.blobHashTreeJSON
-          ? (JSON.parse(session.blobHashTreeJSON) as BlobHashTreeJSON)
-          : undefined;
-
         uploadParamsRef.current.set(videoId, params);
 
+        // Restored sessions start at 1% minimum
         setUploadTasks((prev) => {
           const next = new Map(prev);
           next.set(videoId, {
             videoId,
-            progress: savedPct,
+            progress: 1,
             stage: "uploading",
-            statusMsg:
-              savedPct > 0 ? `Uploading... ${savedPct}%` : "Preparing...",
+            statusMsg: "Uploading... 1%",
           });
           return next;
         });
 
         const delay = 300 + Math.random() * 400;
         setTimeout(() => {
-          runUpload(videoId, params, video!, resumeChunk, precomputedTree);
+          runUpload(videoId, params, video!);
         }, delay);
       }
     })();
@@ -480,7 +471,7 @@ export function UploadManagerProvider({
         return;
       }
 
-      const _totalChunks = Math.ceil(params.file.size / CHUNK_SIZE_BYTES) || 1;
+      const totalChunks = Math.ceil(params.file.size / (5 * 1024 * 1024)) || 1;
 
       (async () => {
         let videoId: string = crypto.randomUUID();
@@ -528,23 +519,23 @@ export function UploadManagerProvider({
         saveVideos([newVideo, ...existing]);
         onVideoAddedRef.current(newVideo);
 
+        // FIX 1: Start at 1% with "Uploading... 1%"
         setUploadTasks((prev) => {
           const next = new Map(prev);
           next.set(videoId, {
             videoId,
-            progress: 0,
+            progress: 1,
             stage: "uploading",
-            statusMsg: "Preparing...",
+            statusMsg: "Uploading... 1%",
           });
           return next;
         });
 
         uploadParamsRef.current.set(videoId, params);
 
-        // lastChunkIndex = -1 (no chunk uploaded yet)
         saveSession({
           videoId,
-          file: params.file, // File object stored by reference in IDB
+          file: params.file,
           title: params.title,
           description: params.description,
           thumbnailDataUrl: params.thumbnailDataUrl,
@@ -553,11 +544,11 @@ export function UploadManagerProvider({
           userId: params.userId,
           displayName: params.displayName,
           lastChunkIndex: -1,
-          totalChunks: _totalChunks,
+          totalChunks,
           createdAt: Date.now(),
         });
 
-        runUpload(videoId, params, newVideo, 0, undefined);
+        runUpload(videoId, params, newVideo);
       })();
     },
     [runUpload],

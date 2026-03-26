@@ -3,9 +3,10 @@ import { IDL } from "@icp-sdk/core/candid";
 
 type Headers = Record<string, string>;
 
-const MAX_RETRIES = 5;
+const MAXIMUM_CONCURRENT_UPLOADS = 10;
+const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
-const MAX_DELAY_MS = 60000;
+const MAX_DELAY_MS = 30000;
 
 const GATEWAY_VERSION = "v1";
 
@@ -17,76 +18,122 @@ const DOMAIN_SEPARATOR_FOR_METADATA = new TextEncoder().encode(
 );
 const DOMAIN_SEPARATOR_FOR_NODES = new TextEncoder().encode("ynode/");
 
-// 5 MB logical chunk size — never holds more than this in memory at once
-export const CHUNK_SIZE_BYTES = 5 * 1024 * 1024;
-
+// Utility function for exponential backoff retry logic - retries on network/server errors only
 async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
   let lastError: Error | undefined;
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
       return await operation();
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Check if this error should be retried
       const shouldRetry = isRetriableError(error);
-      if (attempt === MAX_RETRIES || !shouldRetry) throw error;
+
+      // On the final attempt or non-retriable error, throw the error
+      if (attempt === MAX_RETRIES || !shouldRetry) {
+        if (!shouldRetry && attempt < MAX_RETRIES) {
+          console.warn(
+            `Non-retriable error encountered: ${lastError.message}. Not retrying.`,
+          );
+        }
+        throw error;
+      }
+
+      // Calculate delay with exponential backoff and jitter
       const delay = Math.min(
         BASE_DELAY_MS * 2 ** attempt + Math.random() * 1000,
         MAX_DELAY_MS,
       );
+
       console.warn(
-        `[storage] attempt ${attempt + 1}/${MAX_RETRIES + 1} failed: ${lastError.message}. Retry in ${Math.round(delay)}ms`,
+        `Request failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}): ${lastError.message}. Retrying in ${Math.round(delay)}ms...`,
       );
+
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
-  throw lastError || new Error("Unknown error");
+
+  // This should never happen due to the loop logic, but TypeScript needs it
+  throw lastError || new Error("Unknown error occurred during retry attempts");
 }
 
 function isRetriableError(error: any): boolean {
-  const msg = error?.message?.toLowerCase() || "";
+  const errorMessage = error?.message?.toLowerCase() || "";
+
+  // Don't retry client errors (4xx except specific ones)
   if (error?.response?.status) {
-    const s = error.response.status;
-    if (s === 408 || s === 429) return true;
-    if (s >= 400 && s < 500) return false;
-    if (s >= 500) return true;
+    const status = error.response.status;
+    // Only retry these 4xx errors
+    if (status === 408 || status === 429) return true;
+    // Don't retry other 4xx client errors
+    if (status >= 400 && status < 500) return false;
+    // Retry 5xx server errors
+    if (status >= 500) return true;
   }
+
+  // Retry network/SSL errors
   if (
-    msg.includes("ssl") ||
-    msg.includes("tls") ||
-    msg.includes("network error") ||
-    msg.includes("connection") ||
-    msg.includes("timeout") ||
-    msg.includes("fetch")
-  )
+    errorMessage.includes("ssl") ||
+    errorMessage.includes("tls") ||
+    errorMessage.includes("network error") ||
+    errorMessage.includes("connection") ||
+    errorMessage.includes("timeout") ||
+    errorMessage.includes("fetch")
+  ) {
     return true;
+  }
+
+  // Don't retry validation/logic errors
   if (
-    msg.includes("validation") ||
-    msg.includes("invalid") ||
-    msg.includes("malformed") ||
-    msg.includes("unauthorized") ||
-    msg.includes("forbidden") ||
-    msg.includes("not found")
-  )
+    errorMessage.includes("validation") ||
+    errorMessage.includes("invalid") ||
+    errorMessage.includes("malformed") ||
+    errorMessage.includes("unauthorized") ||
+    errorMessage.includes("forbidden") ||
+    errorMessage.includes("not found")
+  ) {
     return false;
+  }
+
+  // Default to retry for unknown errors (conservative approach for network issues)
   return true;
 }
 
+// Hash validation utility
 function validateHashFormat(hash: string, context: string): void {
-  if (!hash) throw new Error(`${context}: Hash cannot be empty`);
-  if (!hash.startsWith(SHA256_PREFIX))
-    throw new Error(`${context}: Invalid hash format, expected sha256:...`);
-  const hex = hash.substring(SHA256_PREFIX.length);
-  if (hex.length !== 64)
-    throw new Error(`${context}: Hash hex must be 64 chars`);
-  if (!/^[0-9a-f]{64}$/i.test(hex))
-    throw new Error(`${context}: Hash must be hex characters`);
+  if (!hash) {
+    throw new Error(`${context}: Hash cannot be empty`);
+  }
+
+  if (!hash.startsWith(SHA256_PREFIX)) {
+    throw new Error(
+      `${context}: Invalid hash format. Expected format: ${SHA256_PREFIX}<64-char-hex>, got: ${hash}`,
+    );
+  }
+
+  const hexPart = hash.substring(SHA256_PREFIX.length); // Remove 'sha256:' prefix
+  if (hexPart.length !== 64) {
+    throw new Error(
+      `${context}: Invalid hash format. Expected 64 hex characters after ${SHA256_PREFIX}, got ${hexPart.length} characters: ${hash}`,
+    );
+  }
+
+  if (!/^[0-9a-f]{64}$/i.test(hexPart)) {
+    throw new Error(
+      `${context}: Invalid hash format. Hash must contain only hex characters (0-9, a-f), got: ${hash}`,
+    );
+  }
 }
 
 class YHash {
   public readonly bytes: Uint8Array;
+
   constructor(bytes: Uint8Array) {
-    if (bytes.length !== 32)
-      throw new Error(`YHash must be 32 bytes, got ${bytes.length}`);
+    if (bytes.length !== 32) {
+      throw new Error(`YHash must be exactly 32 bytes, got ${bytes.length}`);
+    }
     this.bytes = new Uint8Array(bytes);
   }
 
@@ -94,25 +141,25 @@ class YHash {
     left: YHash | null,
     right: YHash | null,
   ): Promise<YHash> {
-    const leftBytes =
+    let leftBytes =
       left instanceof YHash
         ? left.bytes
         : new TextEncoder().encode("UNBALANCED");
-    const rightBytes =
+    let rightBytes =
       right instanceof YHash
         ? right.bytes
         : new TextEncoder().encode("UNBALANCED");
     const combined = new Uint8Array(
       DOMAIN_SEPARATOR_FOR_NODES.length + leftBytes.length + rightBytes.length,
     );
+    const arrays = [DOMAIN_SEPARATOR_FOR_NODES, leftBytes, rightBytes];
     let offset = 0;
-    for (const d of [DOMAIN_SEPARATOR_FOR_NODES, leftBytes, rightBytes]) {
-      combined.set(d, offset);
-      offset += d.length;
+    for (const data of arrays) {
+      combined.set(data, offset);
+      offset += data.length;
     }
-    return new YHash(
-      new Uint8Array(await crypto.subtle.digest(HASH_ALGORITHM, combined)),
-    );
+    const hashBuffer = await crypto.subtle.digest(HASH_ALGORITHM, combined);
+    return new YHash(new Uint8Array(hashBuffer));
   }
 
   static async fromChunk(data: Uint8Array): Promise<YHash> {
@@ -120,59 +167,65 @@ class YHash {
   }
 
   static async fromHeaders(headers: Headers): Promise<YHash> {
-    const lines = Object.entries(headers)
-      .map(([k, v]) => `${k.trim()}: ${v.trim()}\n`)
-      .sort();
-    return YHash.fromBytes(
+    // For each key,value, generate the header line "key: value\n" where the key and value are trimmed.
+    const headerLines: string[] = [];
+    for (const [key, value] of Object.entries(headers)) {
+      headerLines.push(`${key.trim()}: ${value.trim()}\n`);
+    }
+    // Sort the header lines alphabetically.
+    headerLines.sort();
+
+    // Hash the header lines, with the metadata domain separator.
+    const hash = await YHash.fromBytes(
       DOMAIN_SEPARATOR_FOR_METADATA,
-      new TextEncoder().encode(lines.join("")),
+      new TextEncoder().encode(headerLines.join("")),
     );
+    return hash;
   }
 
-  static async fromBytes(sep: Uint8Array, data: Uint8Array): Promise<YHash> {
-    const combined = new Uint8Array(sep.length + data.length);
-    combined.set(sep);
-    combined.set(data, sep.length);
-    return new YHash(
-      new Uint8Array(await crypto.subtle.digest(HASH_ALGORITHM, combined)),
-    );
+  static async fromBytes(
+    domainSeparator: Uint8Array,
+    data: Uint8Array,
+  ): Promise<YHash> {
+    const combined = new Uint8Array(domainSeparator.length + data.length);
+    combined.set(domainSeparator);
+    combined.set(data, domainSeparator.length);
+    const hashBuffer = await crypto.subtle.digest(HASH_ALGORITHM, combined);
+    return new YHash(new Uint8Array(hashBuffer));
   }
 
-  static fromHex(hexString: string): YHash {
+  public static fromHex(hexString: string): YHash {
     const bytes = new Uint8Array(
-      hexString.match(/.{1,2}/g)!.map((b) => Number.parseInt(b, 16)),
+      hexString.match(/.{1,2}/g)!.map((byte) => Number.parseInt(byte, 16)),
     );
     return new YHash(bytes);
   }
 
-  toShaString(): string {
+  public toShaString(): string {
     return `${SHA256_PREFIX}${this.toHex()}`;
   }
 
-  toString(): string {
-    throw new Error("toString not supported for YHash");
+  public toString(): string {
+    throw new Error("toString is not supported for YHash");
   }
 
   private toHex(): string {
     return Array.from(this.bytes)
-      .map((b) => b.toString(16).padStart(2, "0"))
+      .map((b: number) => b.toString(16).padStart(2, "0"))
       .join("");
   }
 }
 
-type TreeNode = { hash: YHash; left: TreeNode | null; right: TreeNode | null };
+type TreeNode = {
+  hash: YHash;
+  left: TreeNode | null;
+  right: TreeNode | null;
+};
 
-export type TreeNodeJSON = {
+type TreeNodeJSON = {
   hash: string;
   left: TreeNodeJSON | null;
   right: TreeNodeJSON | null;
-};
-
-export type BlobHashTreeJSON = {
-  tree_type: "DSBMTWH";
-  chunk_hashes: string[];
-  tree: TreeNodeJSON;
-  headers: string[];
 };
 
 function nodeToJSON(node: TreeNode): TreeNodeJSON {
@@ -182,6 +235,13 @@ function nodeToJSON(node: TreeNode): TreeNodeJSON {
     right: node.right ? nodeToJSON(node.right) : null,
   };
 }
+
+type BlobHashTreeJSON = {
+  tree_type: "DSBMTWH";
+  chunk_hashes: string[];
+  tree: TreeNodeJSON;
+  headers: string[];
+};
 
 class BlobHashTree {
   public tree_type: "DSBMTWH";
@@ -197,74 +257,84 @@ class BlobHashTree {
     this.tree_type = "DSBMTWH";
     this.chunk_hashes = chunk_hashes;
     this.tree = tree;
-    if (headers == null) this.headers = [];
-    else if (Array.isArray(headers)) this.headers = headers;
-    else
+
+    if (headers == null) {
+      this.headers = [];
+    } else if (Array.isArray(headers)) {
+      this.headers = headers;
+    } else {
       this.headers = Object.entries(headers).map(
-        ([k, v]) => `${k.trim()}: ${v.trim()}`,
+        ([key, value]) => `${key.trim()}: ${value.trim()}`,
       );
+    }
     this.headers.sort();
   }
 
-  static async build(
+  public static async build(
     chunkHashes: YHash[],
     headers: Headers = {},
   ): Promise<BlobHashTree> {
     if (chunkHashes.length === 0) {
+      // To match rust, we have the hash of nothing
       const hex =
         "8b8e620f084e48da0be2287fd12c5aaa4dbe14b468fd2e360f48d741fe7628a0";
-      chunkHashes.push(new YHash(new TextEncoder().encode(hex)));
+      const bytes = new TextEncoder().encode(hex);
+      chunkHashes.push(new YHash(bytes));
     }
+
+    // Create leaf nodes for each chunk hash
     let level: TreeNode[] = chunkHashes.map((hash) => ({
       hash,
       left: null,
       right: null,
     }));
+
+    // Build tree bottom-up
     while (level.length > 1) {
-      const next: TreeNode[] = [];
+      const nextLevel: TreeNode[] = [];
       for (let i = 0; i < level.length; i += 2) {
         const left = level[i];
         const right = level[i + 1] || null;
+
         const parentHash = await YHash.fromNodes(
           left.hash,
           right ? right.hash : null,
         );
-        next.push({ hash: parentHash, left, right });
+        nextLevel.push({
+          hash: parentHash,
+          left,
+          right,
+        });
       }
-      level = next;
+      level = nextLevel;
     }
+
     const chunksRoot = level[0];
+
+    // If headers exist and have content, create combined tree
     if (headers && Object.keys(headers).length > 0) {
-      const metaHash = await YHash.fromHeaders(headers);
-      const metaRoot: TreeNode = { hash: metaHash, left: null, right: null };
-      const combinedHash = await YHash.fromNodes(
+      const metadataRootHash = await YHash.fromHeaders(headers);
+      const metadataRoot: TreeNode = {
+        hash: metadataRootHash,
+        left: null,
+        right: null,
+      };
+      const combinedRootHash = await YHash.fromNodes(
         chunksRoot.hash,
-        metaRoot.hash,
+        metadataRoot.hash,
       );
       const combinedRoot: TreeNode = {
-        hash: combinedHash,
+        hash: combinedRootHash,
         left: chunksRoot,
-        right: metaRoot,
+        right: metadataRoot,
       };
       return new BlobHashTree(chunkHashes, combinedRoot, headers);
     }
+
     return new BlobHashTree(chunkHashes, chunksRoot, headers);
   }
 
-  /** Reconstruct a BlobHashTree from stored JSON (no re-hashing needed). */
-  static fromJSON(json: BlobHashTreeJSON): BlobHashTree {
-    const chunkHashes = json.chunk_hashes.map((h) =>
-      YHash.fromHex(h.replace(SHA256_PREFIX, "")),
-    );
-    const rebuildNode = (n: TreeNodeJSON): TreeNode => ({
-      hash: YHash.fromHex(n.hash.replace(SHA256_PREFIX, "")),
-      left: n.left ? rebuildNode(n.left) : null,
-      right: n.right ? rebuildNode(n.right) : null,
-    });
-    return new BlobHashTree(chunkHashes, rebuildNode(json.tree), json.headers);
-  }
-
-  toJSON(): BlobHashTreeJSON {
+  public toJSON(): BlobHashTreeJSON {
     return {
       tree_type: this.tree_type,
       chunk_hashes: this.chunk_hashes.map((h) => h.toShaString()),
@@ -288,25 +358,28 @@ interface UploadChunkParams {
 class StorageGatewayClient {
   constructor(private readonly storageGatewayUrl: string) {}
 
-  getStorageGatewayUrl(): string {
+  public getStorageGatewayUrl(): string {
     return this.storageGatewayUrl;
   }
 
-  async uploadChunk(
+  public async uploadChunk(
     params: UploadChunkParams,
   ): Promise<{ isComplete: boolean }> {
+    // Validate hash formats before sending to server (validation errors should not be retried)
     const blobHashString = params.blobRootHash.toShaString();
     const chunkHashString = params.chunkHash.toShaString();
     validateHashFormat(
       blobHashString,
-      `uploadChunk[${params.chunkIndex}] blob`,
+      `uploadChunk[${params.chunkIndex}] blob_hash`,
     );
     validateHashFormat(
       chunkHashString,
-      `uploadChunk[${params.chunkIndex}] chunk`,
+      `uploadChunk[${params.chunkIndex}] chunk_hash`,
     );
-    return withRetry(async () => {
-      const qp = new URLSearchParams({
+
+    return await withRetry(async () => {
+      // Use query parameters for metadata and raw bytes in body
+      const queryParams = new URLSearchParams({
         owner_id: params.owner,
         blob_hash: blobHashString,
         chunk_hash: chunkHashString,
@@ -314,7 +387,8 @@ class StorageGatewayClient {
         bucket_name: params.bucketName,
         project_id: params.projectId,
       });
-      const url = `${this.storageGatewayUrl}/${GATEWAY_VERSION}/chunk/?${qp}`;
+      const url = `${this.storageGatewayUrl}/${GATEWAY_VERSION}/chunk/?${queryParams.toString()}`;
+
       const response = await fetch(url, {
         method: "PUT",
         headers: {
@@ -323,20 +397,27 @@ class StorageGatewayClient {
         },
         body: params.chunkData as BodyInit,
       });
+
       if (!response.ok) {
-        const text = await response.text();
-        const err = new Error(
-          `Chunk ${params.chunkIndex} failed: ${response.status} - ${text}`,
+        const errorText = await response.text();
+        const error = new Error(
+          `Failed to upload chunk ${params.chunkIndex}: ${response.status} ${response.statusText} - ${errorText}`,
         );
-        (err as any).response = { status: response.status };
-        throw err;
+        // Add response status for retry logic
+        (error as any).response = { status: response.status };
+        throw error;
       }
-      const result = (await response.json()) as { status: string };
-      return { isComplete: result.status === "blob_complete" };
+
+      const result = (await response.json()) as {
+        status: string;
+      };
+      return {
+        isComplete: result.status === "blob_complete",
+      };
     });
   }
 
-  async uploadBlobTree(
+  public async uploadBlobTree(
     blobHashTree: BlobHashTree,
     bucketName: string,
     numBlobBytes: number,
@@ -344,59 +425,60 @@ class StorageGatewayClient {
     projectId: string,
     certificateBytes: Uint8Array,
   ): Promise<void> {
+    // Validate all hashes in the tree before sending to server (validation errors should not be retried)
     const treeJSON = blobHashTree.toJSON();
-    validateHashFormat(treeJSON.tree.hash, "uploadBlobTree root");
-    treeJSON.chunk_hashes.forEach((h, i) =>
-      validateHashFormat(h, `uploadBlobTree chunk[${i}]`),
-    );
-    return withRetry(async () => {
+    validateHashFormat(treeJSON.tree.hash, "uploadBlobTree root hash");
+    treeJSON.chunk_hashes.forEach((hash, index) => {
+      validateHashFormat(hash, `uploadBlobTree chunk_hash[${index}]`);
+    });
+
+    return await withRetry(async () => {
       const url = `${this.storageGatewayUrl}/${GATEWAY_VERSION}/blob-tree/`;
-      const body = {
+      const requestBody = {
         blob_tree: treeJSON,
         bucket_name: bucketName,
         num_blob_bytes: numBlobBytes,
-        owner,
+        owner: owner,
         project_id: projectId,
         headers: blobHashTree.headers,
-        auth: { OwnerEgressSignature: Array.from(certificateBytes) },
+        auth: {
+          OwnerEgressSignature: Array.from(certificateBytes),
+        },
       };
+
       const response = await fetch(url, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
           "X-Caffeine-Project-ID": projectId,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(requestBody),
       });
+
       if (!response.ok) {
-        const text = await response.text();
-        const err = new Error(
-          `BlobTree upload failed: ${response.status} - ${text}`,
+        const errorText = await response.text();
+        const error = new Error(
+          `Failed to upload blob tree: ${response.status} ${response.statusText} - ${errorText}`,
         );
-        (err as any).response = { status: response.status };
-        throw err;
+        // Add response status for retry logic
+        (error as any).response = { status: response.status };
+        throw error;
       }
     });
   }
 }
 
-export interface PutFileResult {
-  hash: string;
-  treeJSON: BlobHashTreeJSON;
-  totalChunks: number;
-}
-
 export class StorageClient {
-  private readonly gateway: StorageGatewayClient;
+  private readonly storageGatewayClient: StorageGatewayClient;
 
-  constructor(
+  public constructor(
     private readonly bucket: string,
     storageGatewayUrl: string,
     private readonly backendCanisterId: string,
     private readonly projectId: string,
     private readonly agent: HttpAgent,
   ) {
-    this.gateway = new StorageGatewayClient(storageGatewayUrl);
+    this.storageGatewayClient = new StorageGatewayClient(storageGatewayUrl);
   }
 
   private async getCertificate(hash: string): Promise<Uint8Array> {
@@ -405,103 +487,140 @@ export class StorageClient {
       methodName: "_caffeineStorageCreateCertificate",
       arg: args,
     });
-    const body = result.response.body;
-    if (isV3ResponseBody(body)) return body.certificate;
+    const respone = result.response.body;
+    if (isV3ResponseBody(respone)) {
+      console.log("Certificate:", respone.certificate);
+      return respone.certificate;
+    }
     throw new Error("Expected v3 response body");
   }
 
-  /**
-   * Upload a file in memory-safe 5 MB chunks.
-   *
-   * - Never reads more than one chunk into memory at a time.
-   * - Uploads chunks sequentially so memory stays flat.
-   * - Pass `startChunkIndex` + `precomputedTree` to resume after a crash
-   *   without re-hashing the entire file.
-   * - Calls `onProgress(pct, chunkIndex)` after each chunk so callers can
-   *   persist the chunk index for crash-resume.
-   */
-  async putFile(
-    blob: Blob,
-    onProgress?: (percentage: number, chunkIndex: number) => void,
-    startChunkIndex = 0,
-    precomputedTree?: BlobHashTreeJSON,
-  ): Promise<PutFileResult> {
-    const httpHeaders: Headers = { "Content-Type": "application/json" };
+  public async putFile(
+    blobBytes: Uint8Array,
+    onProgress?: (percentage: number) => void,
+  ): Promise<{ hash: string }> {
+    // HTTP headers for fetch requests (used for the PUT request to gateway)
+    const httpHeaders: Headers = {
+      "Content-Type": "application/json",
+    };
+    // Create a Blob from the bytes
+    const file = new Blob([new Uint8Array(blobBytes)], {
+      type: "application/octet-stream",
+    });
+    // File metadata headers that will be stored with the blob tree
     const fileHeaders: Headers = {
       "Content-Type": "application/octet-stream",
-      "Content-Length": blob.size.toString(),
+      "Content-Length": file.size.toString(),
     };
 
-    const totalChunks = Math.ceil(blob.size / CHUNK_SIZE_BYTES) || 1;
-
-    // ── Phase 1: Build blob hash tree ────────────────────────────────────────
-    // If we have a stored tree from a previous run, skip re-hashing entirely.
-    let blobHashTree: BlobHashTree;
-    if (precomputedTree) {
-      blobHashTree = BlobHashTree.fromJSON(precomputedTree);
-    } else {
-      // Hash one chunk at a time — peak memory = CHUNK_SIZE_BYTES
-      const chunkHashes: YHash[] = [];
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE_BYTES;
-        const end = Math.min(start + CHUNK_SIZE_BYTES, blob.size);
-        const chunkData = new Uint8Array(
-          await blob.slice(start, end).arrayBuffer(),
-        );
-        chunkHashes.push(await YHash.fromChunk(chunkData));
-        // chunkData is released here (let GC collect it)
-      }
-      blobHashTree = await BlobHashTree.build(chunkHashes, fileHeaders);
-    }
-
+    const { chunks, chunkHashes, blobHashTree } =
+      await this.processFileForUpload(file, fileHeaders);
     const blobRootHash = blobHashTree.tree.hash;
     const hashString = blobRootHash.toShaString();
 
-    // ── Phase 2: Upload tree metadata (idempotent) ───────────────────────────
     const certificateBytes = await this.getCertificate(hashString);
-    await this.gateway.uploadBlobTree(
+
+    await this.storageGatewayClient.uploadBlobTree(
       blobHashTree,
       this.bucket,
-      blob.size,
+      file.size,
       this.backendCanisterId,
       this.projectId,
       certificateBytes,
     );
+    await this.parallelUpload(
+      chunks,
+      chunkHashes,
+      blobRootHash,
+      httpHeaders,
+      onProgress,
+    );
+    return { hash: hashString };
+  }
 
-    // ── Phase 3: Upload chunks sequentially from startChunkIndex ─────────────
-    for (let i = startChunkIndex; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE_BYTES;
-      const end = Math.min(start + CHUNK_SIZE_BYTES, blob.size);
-      // Slice from the raw File/Blob — no full-file read
-      const chunkData = new Uint8Array(
-        await blob.slice(start, end).arrayBuffer(),
-      );
-      const chunkHash = blobHashTree.chunk_hashes[i];
+  public async getDirectURL(hash: string): Promise<string> {
+    if (!hash) {
+      throw new Error("Hash must not be empty");
+    }
+    validateHashFormat(hash, `getDirectURL for path '${hash}'`);
+    return `${this.storageGatewayClient.getStorageGatewayUrl()}/${GATEWAY_VERSION}/blob/?blob_hash=${encodeURIComponent(hash)}&owner_id=${encodeURIComponent(this.backendCanisterId)}&project_id=${encodeURIComponent(this.projectId)}`;
+  }
 
-      await this.gateway.uploadChunk({
+  private async processFileForUpload(
+    file: Blob,
+    headers: Headers,
+  ): Promise<{
+    chunks: Blob[];
+    chunkHashes: YHash[];
+    blobHashTree: BlobHashTree;
+  }> {
+    const chunks = this.createFileChunks(file);
+    const chunkHashes: YHash[] = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkData = new Uint8Array(await chunks[i].arrayBuffer());
+      const hash = await YHash.fromChunk(chunkData);
+      chunkHashes.push(hash);
+    }
+    const blobHashTree = await BlobHashTree.build(chunkHashes, headers);
+    return { chunks, chunkHashes, blobHashTree };
+  }
+
+  private async parallelUpload(
+    chunks: Blob[],
+    chunkHashes: YHash[],
+    blobRootHash: YHash,
+    httpHeaders: Headers,
+    onProgress: ((percentage: number) => void) | undefined,
+  ): Promise<void> {
+    let completedChunks = 0;
+    const uploadSingleChunk = async (index: number): Promise<void> => {
+      const chunkData = new Uint8Array(await chunks[index].arrayBuffer());
+      const chunkHash = chunkHashes[index];
+      await this.storageGatewayClient.uploadChunk({
         blobRootHash,
         chunkHash,
-        chunkIndex: i,
+        chunkIndex: index,
         chunkData,
         bucketName: this.bucket,
         owner: this.backendCanisterId,
         projectId: this.projectId,
         httpHeaders,
       });
-
-      // Release chunk data — let GC collect before next iteration
-      if (onProgress) {
-        const pct = Math.round(((i + 1) / totalChunks) * 100);
-        onProgress(pct, i);
+      // Use atomic increment to avoid race conditions
+      const currentCompleted = ++completedChunks;
+      if (onProgress != null) {
+        const percentage =
+          chunks.length === 0
+            ? 100
+            : Math.round((currentCompleted / chunks.length) * 100);
+        onProgress(percentage);
       }
-    }
-
-    return { hash: hashString, treeJSON: blobHashTree.toJSON(), totalChunks };
+    };
+    await Promise.all(
+      Array.from(
+        { length: MAXIMUM_CONCURRENT_UPLOADS },
+        async (_, workerId) => {
+          for (
+            let i = workerId;
+            i < chunks.length;
+            i += MAXIMUM_CONCURRENT_UPLOADS
+          ) {
+            await uploadSingleChunk(i);
+          }
+        },
+      ),
+    );
   }
 
-  async getDirectURL(hash: string): Promise<string> {
-    if (!hash) throw new Error("Hash must not be empty");
-    validateHashFormat(hash, "getDirectURL");
-    return `${this.gateway.getStorageGatewayUrl()}/${GATEWAY_VERSION}/blob/?blob_hash=${encodeURIComponent(hash)}&owner_id=${encodeURIComponent(this.backendCanisterId)}&project_id=${encodeURIComponent(this.projectId)}`;
+  private createFileChunks(file: Blob, chunkSize = 1024 * 1024): Blob[] {
+    const chunks: Blob[] = [];
+    const totalChunks = Math.ceil(file.size / chunkSize);
+    for (let index = 0; index < totalChunks; index++) {
+      const start = index * chunkSize;
+      const end = Math.min(start + chunkSize, file.size);
+      const chunk = file.slice(start, end);
+      chunks.push(chunk);
+    }
+    return chunks;
   }
 }
