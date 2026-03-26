@@ -424,7 +424,14 @@ export function UploadManagerProvider({
             }
           }
 
-          const url = await sc.getDirectURL(finalHash);
+          // Safely get the direct URL — never let this throw up to the outer catch
+          let url = "";
+          try {
+            url = await sc.getDirectURL(finalHash);
+          } catch (e) {
+            console.error("[upload] getDirectURL failed, using empty url:", e);
+            url = "";
+          }
 
           try {
             const backendActor = await getBackendActor();
