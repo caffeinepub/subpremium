@@ -2,6 +2,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { VideoRecord } from "../backend";
+import { DeleteVideoButton } from "../components/DeleteVideoButton";
 import { useActor } from "../hooks/useActor";
 import type { Video } from "../types/video";
 import { formatViewsShort } from "../utils/format";
@@ -13,6 +14,7 @@ interface CreatorProfileViewProps {
   onBack: () => void;
   onVideoClick: (video: Video) => void;
   currentUserId?: string;
+  onVideoDeleted?: (videoId: string) => void;
 }
 
 function videoRecordToVideo(r: VideoRecord): Video {
@@ -66,6 +68,7 @@ export function CreatorProfileView({
   onBack,
   onVideoClick,
   currentUserId,
+  onVideoDeleted,
 }: CreatorProfileViewProps) {
   const { actor, isFetching } = useActor();
   const [videos, setVideos] = useState<Video[]>([]);
@@ -107,6 +110,7 @@ export function CreatorProfileView({
       })
       .finally(() => setLoading(false));
   }, [actor, isFetching, creatorId]);
+
   const initials = getInitials(creatorName);
   const username = getUsername(creatorName);
 
@@ -260,45 +264,56 @@ export function CreatorProfileView({
             ) : (
               <div data-ocid="profile.list" className="grid grid-cols-2 gap-3">
                 {videos.map((video, i) => (
-                  <button
-                    key={video.id}
-                    type="button"
-                    data-ocid={`profile.item.${i + 1}`}
-                    onClick={() => onVideoClick(video)}
-                    className="text-left group"
-                  >
-                    <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-secondary">
-                      {video.thumbnailDataUrl ? (
-                        <img
-                          src={video.thumbnailDataUrl}
-                          alt={video.title}
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                          loading="lazy"
+                  <div key={video.id} className="relative">
+                    <button
+                      type="button"
+                      data-ocid={`profile.item.${i + 1}`}
+                      onClick={() => onVideoClick(video)}
+                      className="w-full text-left group"
+                    >
+                      <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-secondary">
+                        {video.thumbnailDataUrl ? (
+                          <img
+                            src={video.thumbnailDataUrl}
+                            alt={video.title}
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            loading="lazy"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <svg
+                              viewBox="0 0 48 48"
+                              className="w-8 h-8 text-muted-foreground opacity-30"
+                              aria-hidden="true"
+                            >
+                              <polygon
+                                points="16,12 36,24 16,36"
+                                fill="currentColor"
+                              />
+                            </svg>
+                          </div>
+                        )}
+                        <DeleteVideoButton
+                          video={video}
+                          currentUserId={currentUserId}
+                          onDelete={(id) => {
+                            setVideos((prev) =>
+                              prev.filter((v) => v.id !== id),
+                            );
+                            onVideoDeleted?.(id);
+                          }}
                         />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center">
-                          <svg
-                            viewBox="0 0 48 48"
-                            className="w-8 h-8 text-muted-foreground opacity-30"
-                            aria-hidden="true"
-                          >
-                            <polygon
-                              points="16,12 36,24 16,36"
-                              fill="currentColor"
-                            />
-                          </svg>
-                        </div>
-                      )}
-                    </div>
-                    <div className="mt-1.5">
-                      <p className="text-xs font-medium text-foreground line-clamp-2 leading-snug">
-                        {video.title}
-                      </p>
-                      <p className="text-[11px] text-muted-foreground mt-0.5">
-                        {formatViewsShort(video.views)} views
-                      </p>
-                    </div>
-                  </button>
+                      </div>
+                      <div className="mt-1.5">
+                        <p className="text-xs font-medium text-foreground line-clamp-2 leading-snug">
+                          {video.title}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground mt-0.5">
+                          {formatViewsShort(video.views)} views
+                        </p>
+                      </div>
+                    </button>
+                  </div>
                 ))}
               </div>
             ))}

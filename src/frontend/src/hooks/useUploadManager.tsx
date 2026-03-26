@@ -14,8 +14,10 @@ import { StorageClient } from "../utils/StorageClient";
 import { getBackendActor } from "../utils/backendActor";
 import {
   deleteSession,
+  isUploadDeleted,
   loadAllSessions,
   loadSession,
+  markUploadDeleted,
   saveSession,
   updateUploadProgress,
 } from "../utils/uploadPersistence";
@@ -493,9 +495,12 @@ export function UploadManagerProvider({
     (async () => {
       const sessions = await loadAllSessions();
       if (sessions.length === 0) return;
+      // loadAllSessions already filters tombstoned sessions, but double-check
+      const validSessions = sessions.filter((s) => !isUploadDeleted(s.videoId));
+      if (validSessions.length === 0) return;
       const storedVideos = getVideos();
 
-      for (const session of sessions) {
+      for (const session of validSessions) {
         const { videoId } = session;
         if (runnerActiveRef.current.has(videoId)) continue;
 
@@ -728,6 +733,9 @@ export function UploadManagerProvider({
 
   const cancelUpload = useCallback(
     (videoId: string) => {
+      // Synchronous tombstone FIRST — guards against reload re-hydration
+      markUploadDeleted(videoId);
+
       abortControllersRef.current.get(videoId)?.abort();
       abortControllersRef.current.delete(videoId);
 
@@ -735,6 +743,13 @@ export function UploadManagerProvider({
       pausedByUserRef.current.delete(videoId);
       networkPausedRef.current.delete(videoId);
       uploadParamsRef.current.delete(videoId);
+
+      // Clean up caption localStorage entries
+      const keys = Object.keys(localStorage).filter((k) =>
+        k.startsWith(`caption_content_${videoId}_`),
+      );
+      for (const k of keys) localStorage.removeItem(k);
+
       deleteSession(videoId).catch(() => {});
       deleteVideo(videoId);
       removeTask(videoId);

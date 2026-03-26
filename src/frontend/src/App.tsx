@@ -1,5 +1,6 @@
 import { Toaster } from "@/components/ui/sonner";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import type { VideoRecord } from "./backend";
 import { BottomNav } from "./components/BottomNav";
 import { Header } from "./components/Header";
@@ -127,10 +128,10 @@ function NotificationPopup({
         <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center shrink-0 mt-0.5">
           <span className="text-base">
             {notif.type === "upload"
-              ? "✅"
+              ? "\u2705"
               : notif.type === "like"
-                ? "👍"
-                : "💬"}
+                ? "\uD83D\uDC4D"
+                : "\uD83D\uDCAC"}
           </span>
         </div>
         <div className="flex-1 min-w-0">
@@ -304,6 +305,53 @@ function AppInner() {
     setVideos((prev) => prev.filter((v) => v.id !== id));
   }, []);
 
+  const handleVideoDeleted = useCallback(
+    async (videoId: string) => {
+      // Optimistic remove
+      setVideos((prev) => prev.filter((v) => v.id !== videoId));
+
+      // Clear localStorage caches
+      try {
+        const keysToCheck = ["subpremium_videos", "videos"];
+        for (const key of keysToCheck) {
+          const raw = localStorage.getItem(key);
+          if (raw) {
+            try {
+              const arr = JSON.parse(raw);
+              if (Array.isArray(arr)) {
+                const filtered = arr.filter(
+                  (v: { id?: string; videoId?: string }) =>
+                    v.id !== videoId && v.videoId !== videoId,
+                );
+                localStorage.setItem(key, JSON.stringify(filtered));
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+
+      // Backend delete
+      if (actor) {
+        try {
+          await actor.deleteVideo(videoId);
+        } catch (e) {
+          console.error("[delete] backend delete failed:", e);
+          // Refetch from backend to restore correct state
+          try {
+            const backendVideos = await actor.getAllVideos();
+            const mapped = backendVideos.map(videoRecordToVideo);
+            const uploadingFromLS = getVideos().filter(
+              (v) => v.status !== "ready",
+            );
+            setVideos([...uploadingFromLS, ...mapped]);
+          } catch {}
+          toast.error("Failed to delete video. Please try again.");
+        }
+      }
+    },
+    [actor],
+  );
+
   const handleLoginSuccess = useCallback(() => {
     // Always return to a safe non-auth view
     const dest = AUTH_VIEWS.includes(prevView) ? "home" : prevView;
@@ -403,6 +451,7 @@ function AppInner() {
               onVideoClick={handleVideoClick}
               onUploadClick={() => handleNavChange("upload")}
               onCreatorClick={handleCreatorClick}
+              onVideoDeleted={handleVideoDeleted}
             />
           )}
 
@@ -426,6 +475,7 @@ function AppInner() {
               onBack={() => setCurrentView("home")}
               onVideoClick={handleVideoClick}
               currentUserId={user?.userId}
+              onVideoDeleted={handleVideoDeleted}
             />
           )}
 
@@ -463,6 +513,7 @@ function AppInner() {
               allVideos={videos}
               onBack={() => handleNavChange("menu")}
               onVideoClick={handleVideoClick}
+              onVideoDeleted={handleVideoDeleted}
             />
           )}
 
@@ -506,11 +557,11 @@ function AppInner() {
           )}
         </main>
 
-        {/* Offline banner — thin strip at top, non-blocking */}
+        {/* Offline banner \u2014 thin strip at top, non-blocking */}
         {isOffline && (
           <div className="fixed top-0 left-0 right-0 z-[100] pointer-events-none">
             <div className="bg-yellow-500/90 text-black text-xs font-medium text-center py-1">
-              You're offline
+              You&apos;re offline
             </div>
           </div>
         )}

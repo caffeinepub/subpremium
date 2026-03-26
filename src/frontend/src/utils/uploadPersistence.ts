@@ -2,6 +2,8 @@ const DB_NAME = "upload-sessions";
 const STORE_NAME = "sessions";
 const DB_VERSION = 2;
 
+const DELETED_UPLOADS_KEY = "subpremium_deleted_uploads";
+
 export interface PersistedSession {
   videoId: string;
   file: File;
@@ -21,6 +23,36 @@ export interface PersistedSession {
   /** Serialised BlobHashTree JSON — stored after first tree build so resume
    *  can skip re-hashing the entire file. */
   blobHashTreeJSON?: string;
+}
+
+export function markUploadDeleted(videoId: string): void {
+  try {
+    const raw = localStorage.getItem(DELETED_UPLOADS_KEY);
+    const set: string[] = raw ? JSON.parse(raw) : [];
+    if (!set.includes(videoId)) {
+      set.push(videoId);
+      localStorage.setItem(DELETED_UPLOADS_KEY, JSON.stringify(set));
+    }
+  } catch {}
+}
+
+export function isUploadDeleted(videoId: string): boolean {
+  try {
+    const raw = localStorage.getItem(DELETED_UPLOADS_KEY);
+    if (!raw) return false;
+    return (JSON.parse(raw) as string[]).includes(videoId);
+  } catch {
+    return false;
+  }
+}
+
+export function clearDeletedUploadMark(videoId: string): void {
+  try {
+    const raw = localStorage.getItem(DELETED_UPLOADS_KEY);
+    if (!raw) return;
+    const set = (JSON.parse(raw) as string[]).filter((id) => id !== videoId);
+    localStorage.setItem(DELETED_UPLOADS_KEY, JSON.stringify(set));
+  } catch {}
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -151,7 +183,18 @@ export async function loadAllSessions(): Promise<PersistedSession[]> {
       req.onerror = () => reject(req.error);
     });
     db.close();
-    return result;
+
+    // Filter out tombstoned (deleted) sessions and clean up their IDB records
+    const live: PersistedSession[] = [];
+    for (const session of result) {
+      if (isUploadDeleted(session.videoId)) {
+        // Clean up IDB record asynchronously
+        deleteSession(session.videoId).catch(() => {});
+      } else {
+        live.push(session);
+      }
+    }
+    return live;
   } catch (err) {
     console.error("[uploadPersistence] loadAllSessions error:", err);
     return [];
@@ -159,6 +202,8 @@ export async function loadAllSessions(): Promise<PersistedSession[]> {
 }
 
 export async function deleteSession(videoId: string): Promise<void> {
+  // Mark as deleted synchronously FIRST so reload safety kicks in immediately
+  markUploadDeleted(videoId);
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
@@ -171,7 +216,10 @@ export async function deleteSession(videoId: string): Promise<void> {
       tx.onerror = () => reject(tx.error);
     });
     db.close();
+    // IDB record gone — tombstone no longer needed
+    clearDeletedUploadMark(videoId);
   } catch (err) {
     console.error("[uploadPersistence] deleteSession error:", err);
+    // Leave tombstone in place — it will guard against re-hydration
   }
 }
