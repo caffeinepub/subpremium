@@ -16,6 +16,8 @@ export interface PersistedSession {
   lastChunkIndex: number;
   totalChunks: number;
   createdAt: number;
+  /** Confirmed uploaded bytes — single source of truth for progress. Default 0 for older records. */
+  uploadedBytes: number;
   /** Serialised BlobHashTree JSON — stored after first tree build so resume
    *  can skip re-hashing the entire file. */
   blobHashTreeJSON?: string;
@@ -53,10 +55,14 @@ export async function saveSession(session: PersistedSession): Promise<void> {
   }
 }
 
-/** Update the last completed chunk index AND optionally the stored tree JSON. */
-export async function updateChunkIndex(
+/**
+ * Update uploadedBytes + lastChunkIndex atomically, and optionally the tree JSON.
+ * This is the single writer for progress state.
+ */
+export async function updateUploadProgress(
   videoId: string,
-  chunkIndex: number,
+  uploadedBytes: number,
+  lastChunkIndex: number,
   blobHashTreeJSON?: string,
 ): Promise<void> {
   try {
@@ -71,7 +77,8 @@ export async function updateChunkIndex(
           resolve();
           return;
         }
-        record.lastChunkIndex = chunkIndex;
+        record.uploadedBytes = uploadedBytes;
+        record.lastChunkIndex = lastChunkIndex;
         if (blobHashTreeJSON !== undefined) {
           record.blobHashTreeJSON = blobHashTreeJSON;
         }
@@ -84,8 +91,17 @@ export async function updateChunkIndex(
     });
     db.close();
   } catch (err) {
-    console.error("[uploadPersistence] updateChunkIndex error:", err);
+    console.error("[uploadPersistence] updateUploadProgress error:", err);
   }
+}
+
+/** Backward-compat shim — delegates to updateUploadProgress. */
+export async function updateChunkIndex(
+  videoId: string,
+  chunkIndex: number,
+  blobHashTreeJSON?: string,
+): Promise<void> {
+  await updateUploadProgress(videoId, 0, chunkIndex, blobHashTreeJSON);
 }
 
 export async function loadSession(
@@ -98,7 +114,13 @@ export async function loadSession(
         const tx = db.transaction(STORE_NAME, "readonly");
         const store = tx.objectStore(STORE_NAME);
         const req = store.get(videoId);
-        req.onsuccess = () => resolve((req.result as PersistedSession) ?? null);
+        req.onsuccess = () => {
+          const rec = req.result as PersistedSession | undefined;
+          if (rec && rec.uploadedBytes === undefined) {
+            rec.uploadedBytes = 0;
+          }
+          resolve(rec ?? null);
+        };
         req.onerror = () => reject(req.error);
       },
     );
@@ -117,7 +139,15 @@ export async function loadAllSessions(): Promise<PersistedSession[]> {
       const tx = db.transaction(STORE_NAME, "readonly");
       const store = tx.objectStore(STORE_NAME);
       const req = store.getAll();
-      req.onsuccess = () => resolve((req.result as PersistedSession[]) ?? []);
+      req.onsuccess = () => {
+        const records = (req.result as PersistedSession[]) ?? [];
+        for (const rec of records) {
+          if (rec.uploadedBytes === undefined) {
+            rec.uploadedBytes = 0;
+          }
+        }
+        resolve(records);
+      };
       req.onerror = () => reject(req.error);
     });
     db.close();

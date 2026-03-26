@@ -334,28 +334,6 @@ class BlobHashTree {
     return new BlobHashTree(chunkHashes, chunksRoot, headers);
   }
 
-  public static fromJSON(json: BlobHashTreeJSON): BlobHashTree {
-    const chunkHashes = json.chunk_hashes.map((h) => {
-      const hex = h.startsWith(SHA256_PREFIX)
-        ? h.slice(SHA256_PREFIX.length)
-        : h;
-      return YHash.fromHex(hex);
-    });
-
-    function nodeFromJSON(n: TreeNodeJSON): TreeNode {
-      const hex = n.hash.startsWith(SHA256_PREFIX)
-        ? n.hash.slice(SHA256_PREFIX.length)
-        : n.hash;
-      return {
-        hash: YHash.fromHex(hex),
-        left: n.left ? nodeFromJSON(n.left) : null,
-        right: n.right ? nodeFromJSON(n.right) : null,
-      };
-    }
-
-    return new BlobHashTree(chunkHashes, nodeFromJSON(json.tree), json.headers);
-  }
-
   public toJSON(): BlobHashTreeJSON {
     return {
       tree_type: this.tree_type,
@@ -566,103 +544,6 @@ export class StorageClient {
     }
     validateHashFormat(hash, `getDirectURL for path '${hash}'`);
     return `${this.storageGatewayClient.getStorageGatewayUrl()}/${GATEWAY_VERSION}/blob/?blob_hash=${encodeURIComponent(hash)}&owner_id=${encodeURIComponent(this.backendCanisterId)}&project_id=${encodeURIComponent(this.projectId)}`;
-  }
-
-  public async putBlob(
-    file: File,
-    onProgress: (pct: number) => void,
-    signal: AbortSignal,
-    resumeState?: { fromChunk: number; treeJSON: BlobHashTreeJSON },
-    onChunkComplete?: (
-      chunkIndex: number,
-      treeJSON?: BlobHashTreeJSON,
-    ) => Promise<void>,
-  ): Promise<{ hash: string }> {
-    const CHUNK_SIZE = 1024 * 1024; // 1 MB
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
-    const httpHeaders: Headers = { "Content-Type": "application/json" };
-
-    let blobHashTree: BlobHashTree;
-    let blobRootHash: YHash;
-
-    if (resumeState?.treeJSON) {
-      // Restore from saved tree JSON — skip re-hashing and re-uploading tree
-      blobHashTree = BlobHashTree.fromJSON(resumeState.treeJSON);
-      blobRootHash = blobHashTree.tree.hash;
-    } else {
-      // Build tree fresh
-      const fileHeaders: Headers = {
-        "Content-Type": file.type || "application/octet-stream",
-        "Content-Length": file.size.toString(),
-      };
-      const chunkHashes: YHash[] = [];
-      for (let i = 0; i < totalChunks; i++) {
-        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunkData = new Uint8Array(
-          await file.slice(start, end).arrayBuffer(),
-        );
-        chunkHashes.push(await YHash.fromChunk(chunkData));
-      }
-
-      blobHashTree = await BlobHashTree.build(chunkHashes, fileHeaders);
-      blobRootHash = blobHashTree.tree.hash;
-      const hashString = blobRootHash.toShaString();
-
-      // Persist tree JSON so resume can skip this step
-      if (onChunkComplete) {
-        await onChunkComplete(-1, blobHashTree.toJSON());
-      }
-
-      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-
-      const certificateBytes = await this.getCertificate(hashString);
-      await this.storageGatewayClient.uploadBlobTree(
-        blobHashTree,
-        this.bucket,
-        file.size,
-        this.backendCanisterId,
-        this.projectId,
-        certificateBytes,
-      );
-    }
-
-    const hashString = blobRootHash.toShaString();
-    const fromChunk = resumeState?.fromChunk ?? 0;
-
-    for (let i = fromChunk; i < totalChunks; i++) {
-      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-
-      const start = i * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE, file.size);
-      const chunkData = new Uint8Array(
-        await file.slice(start, end).arrayBuffer(),
-      );
-      const chunkHash = blobHashTree.chunk_hashes[i];
-
-      await this.storageGatewayClient.uploadChunk({
-        blobRootHash,
-        chunkHash,
-        chunkIndex: i,
-        chunkData,
-        bucketName: this.bucket,
-        owner: this.backendCanisterId,
-        projectId: this.projectId,
-        httpHeaders,
-      });
-
-      if (onChunkComplete) {
-        await onChunkComplete(i);
-      }
-
-      const pct = Math.round(((i + 1) / totalChunks) * 100);
-      onProgress(pct);
-
-      if (signal.aborted) throw new DOMException("Aborted", "AbortError");
-    }
-
-    return { hash: hashString };
   }
 
   private async processFileForUpload(
