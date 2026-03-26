@@ -15,7 +15,9 @@ import { getBackendActor } from "../utils/backendActor";
 import {
   deleteSession,
   loadAllSessions,
+  loadSession,
   saveSession,
+  updateChunkIndex,
 } from "../utils/uploadPersistence";
 import {
   deleteVideo,
@@ -131,12 +133,23 @@ export function UploadManagerProvider({
 
       (async () => {
         try {
-          // Fresh uploads start at 1%
+          // Load persisted session to determine resume position
+          const initialSession = await loadSession(videoId);
+          const totalChunks = Math.ceil(params.file.size / (1024 * 1024)) || 1;
+          const initialFromChunk =
+            initialSession && initialSession.lastChunkIndex >= 0
+              ? initialSession.lastChunkIndex + 1
+              : 0;
+          const startPct = Math.max(
+            1,
+            Math.round((initialFromChunk / totalChunks) * 100),
+          );
+
           updateTask(videoId, {
             stage: "uploading",
             isPaused: false,
-            progress: 1,
-            statusMsg: "Uploading... 1%",
+            progress: startPct,
+            statusMsg: `Uploading... ${startPct}%`,
           });
 
           // Seed the failsafe timer so it doesn't fire immediately
@@ -173,6 +186,20 @@ export function UploadManagerProvider({
             }
 
             try {
+              // Reload session on every attempt to get the latest chunk position
+              const currentSession = await loadSession(videoId);
+              const fromChunk =
+                currentSession && currentSession.lastChunkIndex >= 0
+                  ? currentSession.lastChunkIndex + 1
+                  : 0;
+              const resumeState =
+                currentSession?.blobHashTreeJSON && fromChunk > 0
+                  ? {
+                      fromChunk,
+                      treeJSON: JSON.parse(currentSession.blobHashTreeJSON),
+                    }
+                  : undefined;
+
               // Create a fresh AbortController for each attempt
               const controller = new AbortController();
               abortControllersRef.current.set(videoId, controller);
@@ -201,6 +228,19 @@ export function UploadManagerProvider({
                   });
                 },
                 controller.signal,
+                resumeState,
+                async (chunkIndex, treeJSON) => {
+                  // chunkIndex === -1 means tree was just built; save full tree JSON
+                  if (treeJSON !== undefined) {
+                    await updateChunkIndex(
+                      videoId,
+                      -1,
+                      JSON.stringify(treeJSON),
+                    );
+                  } else {
+                    await updateChunkIndex(videoId, chunkIndex);
+                  }
+                },
               );
 
               abortControllersRef.current.delete(videoId);
@@ -427,14 +467,25 @@ export function UploadManagerProvider({
 
         uploadParamsRef.current.set(videoId, params);
 
-        // Restored sessions start at 1% minimum
+        // Restored sessions: reflect actual chunk progress, not just 1%
+        const totalChunks =
+          session.totalChunks ||
+          Math.ceil(session.file.size / (1024 * 1024)) ||
+          1;
+        const resumedFromChunk =
+          session.lastChunkIndex >= 0 ? session.lastChunkIndex + 1 : 0;
+        const resumePct = Math.max(
+          1,
+          Math.round((resumedFromChunk / totalChunks) * 100),
+        );
+
         setUploadTasks((prev) => {
           const next = new Map(prev);
           next.set(videoId, {
             videoId,
-            progress: 1,
+            progress: resumePct,
             stage: "uploading",
-            statusMsg: "Uploading... 1%",
+            statusMsg: `Uploading... ${resumePct}%`,
             title: session.title,
           });
           return next;
@@ -510,7 +561,8 @@ export function UploadManagerProvider({
         return;
       }
 
-      const totalChunks = Math.ceil(params.file.size / (5 * 1024 * 1024)) || 1;
+      // Use 1MB chunks (matching putBlob) for accurate totalChunks count
+      const totalChunks = Math.ceil(params.file.size / (1024 * 1024)) || 1;
 
       (async () => {
         let videoId: string = crypto.randomUUID();
