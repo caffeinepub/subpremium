@@ -23,7 +23,12 @@ export interface PersistedSession {
   /** Serialised BlobHashTree JSON — stored after first tree build so resume
    *  can skip re-hashing the entire file. */
   blobHashTreeJSON?: string;
+  /** Lifecycle status — "uploading" while active, "DELETED" when removed.
+   *  Used as a hard guard so deleted sessions never survive a reload. */
+  status?: "uploading" | "DELETED";
 }
+
+// ─── Tombstone helpers (localStorage — synchronous) ───────────────────────────
 
 export function markUploadDeleted(videoId: string): void {
   try {
@@ -55,6 +60,8 @@ export function clearDeletedUploadMark(videoId: string): void {
   } catch {}
 }
 
+// ─── IndexedDB helpers ────────────────────────────────────────────────────────
+
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -70,12 +77,15 @@ function openDB(): Promise<IDBDatabase> {
 }
 
 export async function saveSession(session: PersistedSession): Promise<void> {
+  // Never persist a session that is already marked deleted
+  if (isUploadDeleted(session.videoId)) return;
+  const record: PersistedSession = { ...session, status: "uploading" };
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
       const store = tx.objectStore(STORE_NAME);
-      const req = store.put(session);
+      const req = store.put(record);
       req.onsuccess = () => resolve();
       req.onerror = () => reject(req.error);
       tx.oncomplete = () => resolve();
@@ -97,6 +107,8 @@ export async function updateUploadProgress(
   lastChunkIndex: number,
   blobHashTreeJSON?: string,
 ): Promise<void> {
+  // Skip persistence if this upload has been deleted
+  if (isUploadDeleted(videoId)) return;
   try {
     const db = await openDB();
     await new Promise<void>((resolve, reject) => {
@@ -105,7 +117,7 @@ export async function updateUploadProgress(
       const getReq = store.get(videoId);
       getReq.onsuccess = () => {
         const record = getReq.result as PersistedSession | undefined;
-        if (!record) {
+        if (!record || record.status === "DELETED") {
           resolve();
           return;
         }
@@ -139,6 +151,7 @@ export async function updateChunkIndex(
 export async function loadSession(
   videoId: string,
 ): Promise<PersistedSession | null> {
+  if (isUploadDeleted(videoId)) return null;
   try {
     const db = await openDB();
     const result = await new Promise<PersistedSession | null>(
@@ -148,10 +161,14 @@ export async function loadSession(
         const req = store.get(videoId);
         req.onsuccess = () => {
           const rec = req.result as PersistedSession | undefined;
-          if (rec && rec.uploadedBytes === undefined) {
+          if (!rec || rec.status === "DELETED") {
+            resolve(null);
+            return;
+          }
+          if (rec.uploadedBytes === undefined) {
             rec.uploadedBytes = 0;
           }
-          resolve(rec ?? null);
+          resolve(rec);
         };
         req.onerror = () => reject(req.error);
       },
@@ -162,6 +179,13 @@ export async function loadSession(
     console.error("[uploadPersistence] loadSession error:", err);
     return null;
   }
+}
+
+/** Return true if a File object appears to be a real, accessible blob. */
+function isValidFile(file: unknown): file is File {
+  return (
+    file instanceof File && file.size > 0 && typeof file.slice === "function"
+  );
 }
 
 export async function loadAllSessions(): Promise<PersistedSession[]> {
@@ -184,15 +208,36 @@ export async function loadAllSessions(): Promise<PersistedSession[]> {
     });
     db.close();
 
-    // Filter out tombstoned (deleted) sessions and clean up their IDB records
     const live: PersistedSession[] = [];
     for (const session of result) {
+      // Hard filter 1: localStorage tombstone
       if (isUploadDeleted(session.videoId)) {
-        // Clean up IDB record asynchronously
         deleteSession(session.videoId).catch(() => {});
-      } else {
-        live.push(session);
+        continue;
       }
+
+      // Hard filter 2: IDB status flag
+      if (session.status === "DELETED") {
+        deleteSession(session.videoId).catch(() => {});
+        continue;
+      }
+
+      // Hard filter 3: incomplete/invalid record
+      if (!session.videoId || !session.title) {
+        deleteSession(session.videoId).catch(() => {});
+        continue;
+      }
+
+      // Hard filter 4: missing or inaccessible file blob
+      // Ghost uploads always fail here — no valid File means no real upload
+      if (!isValidFile(session.file)) {
+        // Purge from IDB so it never re-surfaces
+        markUploadDeleted(session.videoId);
+        deleteSession(session.videoId).catch(() => {});
+        continue;
+      }
+
+      live.push(session);
     }
     return live;
   } catch (err) {
@@ -201,11 +246,36 @@ export async function loadAllSessions(): Promise<PersistedSession[]> {
   }
 }
 
+/**
+ * Mark the session as DELETED inside IDB first (belt-and-suspenders), then
+ * physically remove the record.  The localStorage tombstone is written before
+ * any async work so a reload mid-delete can never resurrect the session.
+ */
 export async function deleteSession(videoId: string): Promise<void> {
-  // Mark as deleted synchronously FIRST so reload safety kicks in immediately
+  // 1. Synchronous tombstone — guards against reload re-hydration immediately
   markUploadDeleted(videoId);
+
   try {
     const db = await openDB();
+
+    // 2. Stamp the record as DELETED inside IDB (survives if physical delete races)
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const getReq = store.get(videoId);
+      getReq.onsuccess = () => {
+        const rec = getReq.result as PersistedSession | undefined;
+        if (rec) {
+          rec.status = "DELETED";
+          store.put(rec);
+        }
+        resolve();
+      };
+      getReq.onerror = () => resolve(); // non-fatal
+      tx.onerror = () => resolve();
+    });
+
+    // 3. Physical delete
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, "readwrite");
       const store = tx.objectStore(STORE_NAME);
@@ -215,11 +285,12 @@ export async function deleteSession(videoId: string): Promise<void> {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
+
     db.close();
-    // IDB record gone — tombstone no longer needed
+    // IDB record is gone — safe to clean up the localStorage tombstone
     clearDeletedUploadMark(videoId);
   } catch (err) {
     console.error("[uploadPersistence] deleteSession error:", err);
-    // Leave tombstone in place — it will guard against re-hydration
+    // Leave tombstone in place — it will keep guarding against re-hydration
   }
 }

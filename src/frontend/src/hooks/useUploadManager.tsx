@@ -90,6 +90,13 @@ function bytesToProgress(uploadedBytes: number, totalFileSize: number): number {
   return Math.min(p, 100);
 }
 
+/** Verify a File object is accessible and has real content. */
+function isValidFile(file: unknown): file is File {
+  return (
+    file instanceof File && file.size > 0 && typeof file.slice === "function"
+  );
+}
+
 export function UploadManagerProvider({
   children,
   onVideoAdded,
@@ -149,6 +156,7 @@ export function UploadManagerProvider({
     abortControllersRef.current.delete(videoId);
     uploadedBytesRef.current.delete(videoId);
     currentProgressRef.current.delete(videoId);
+    uploadParamsRef.current.delete(videoId);
   }, []);
 
   const runUpload = useCallback(
@@ -159,8 +167,21 @@ export function UploadManagerProvider({
 
       (async () => {
         try {
+          // Guard: if already deleted by the time the runner starts, bail out
+          if (isUploadDeleted(videoId) || cancelledRef.current.has(videoId)) {
+            runnerActiveRef.current.delete(videoId);
+            return;
+          }
+
           // Load persisted session to determine resume position from bytes (not chunk index)
           const initialSession = await loadSession(videoId);
+          if (!initialSession) {
+            // Session was deleted between mount and runner start
+            runnerActiveRef.current.delete(videoId);
+            removeTask(videoId);
+            return;
+          }
+
           const restoredBytes = initialSession?.uploadedBytes ?? 0;
           uploadedBytesRef.current.set(videoId, restoredBytes);
           const restoredProgress = bytesToProgress(
@@ -213,6 +234,12 @@ export function UploadManagerProvider({
             try {
               // Reload session on every attempt to get the latest position
               const currentSession = await loadSession(videoId);
+              if (!currentSession) {
+                // Session was deleted mid-upload
+                runnerActiveRef.current.delete(videoId);
+                return;
+              }
+
               const fromChunk =
                 currentSession && currentSession.lastChunkIndex >= 0
                   ? currentSession.lastChunkIndex + 1
@@ -252,6 +279,13 @@ export function UploadManagerProvider({
                 controller.signal,
                 resumeState,
                 async (chunkIndex: number, treeJSON?: unknown) => {
+                  // Double-check: if deleted mid-chunk, stop writing
+                  if (
+                    cancelledRef.current.has(videoId) ||
+                    isUploadDeleted(videoId)
+                  )
+                    return;
+
                   if (treeJSON !== undefined) {
                     // Tree build complete — save tree JSON but do NOT change uploadedBytes
                     const currentBytes =
@@ -493,15 +527,41 @@ export function UploadManagerProvider({
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once
   useEffect(() => {
     (async () => {
+      // loadAllSessions applies: tombstone filter, status=DELETED filter,
+      // invalid record filter, and file blob validity filter.
       const sessions = await loadAllSessions();
-      if (sessions.length === 0) return;
-      // loadAllSessions already filters tombstoned sessions, but double-check
-      const validSessions = sessions.filter((s) => !isUploadDeleted(s.videoId));
-      if (validSessions.length === 0) return;
-      const storedVideos = getVideos();
 
-      for (const session of validSessions) {
+      // Purge stale "uploading" videos from localStorage that have no valid session.
+      // This cleans up ghost video cards left from previously deleted uploads.
+      const validSessionIds = new Set(sessions.map((s) => s.videoId));
+      const storedVideos = getVideos();
+      const ghostVideoIds = storedVideos
+        .filter((v) => v.status === "uploading" && !validSessionIds.has(v.id))
+        .map((v) => v.id);
+      if (ghostVideoIds.length > 0) {
+        saveVideos(storedVideos.filter((v) => !ghostVideoIds.includes(v.id)));
+        for (const id of ghostVideoIds) {
+          onVideoRemovedRef.current?.(id);
+          // Ensure these are tombstoned so they can't sneak back
+          markUploadDeleted(id);
+        }
+      }
+
+      if (sessions.length === 0) return;
+
+      const freshStoredVideos = getVideos();
+
+      for (const session of sessions) {
         const { videoId } = session;
+
+        // Belt-and-suspenders: re-check tombstone and file validity here
+        // even though loadAllSessions already filtered them.
+        if (isUploadDeleted(videoId)) continue;
+        if (!isValidFile(session.file)) {
+          markUploadDeleted(videoId);
+          deleteSession(videoId).catch(() => {});
+          continue;
+        }
         if (runnerActiveRef.current.has(videoId)) continue;
 
         const params: StartUploadParams = {
@@ -515,7 +575,7 @@ export function UploadManagerProvider({
           displayName: session.displayName,
         };
 
-        let video = storedVideos.find((v) => v.id === videoId);
+        let video = freshStoredVideos.find((v) => v.id === videoId);
         if (!video) {
           video = {
             id: videoId,
@@ -733,26 +793,37 @@ export function UploadManagerProvider({
 
   const cancelUpload = useCallback(
     (videoId: string) => {
-      // Synchronous tombstone FIRST — guards against reload re-hydration
+      // 1. Synchronous tombstone FIRST — immediately blocks reload re-hydration
       markUploadDeleted(videoId);
 
+      // 2. Abort any in-flight request
       abortControllersRef.current.get(videoId)?.abort();
       abortControllersRef.current.delete(videoId);
 
+      // 3. Mark as cancelled so runUpload runner exits on next check
       cancelledRef.current.add(videoId);
       pausedByUserRef.current.delete(videoId);
       networkPausedRef.current.delete(videoId);
+
+      // 4. Remove from in-memory queue so it can't be referenced
       uploadParamsRef.current.delete(videoId);
 
-      // Clean up caption localStorage entries
+      // 5. Clean up caption localStorage entries
       const keys = Object.keys(localStorage).filter((k) =>
         k.startsWith(`caption_content_${videoId}_`),
       );
       for (const k of keys) localStorage.removeItem(k);
 
+      // 6. Async: stamp DELETED in IDB and physically delete the record
       deleteSession(videoId).catch(() => {});
+
+      // 7. Remove from video localStorage cache
       deleteVideo(videoId);
+
+      // 8. Remove from in-memory task map and all refs
       removeTask(videoId);
+
+      // 9. Notify parent so the video card is removed from UI immediately
       onVideoRemovedRef.current?.(videoId);
     },
     [removeTask],
