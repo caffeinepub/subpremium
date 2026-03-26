@@ -62,6 +62,19 @@ export type LoginResult = {
     __kind__: "ok";
     ok: {
         token: string;
+        refreshToken: string;
+        displayName: string;
+        userId: string;
+    };
+} | {
+    __kind__: "err";
+    err: string;
+};
+export type RefreshResult = {
+    __kind__: "ok";
+    ok: {
+        token: string;
+        refreshToken: string;
         displayName: string;
         userId: string;
     };
@@ -97,10 +110,20 @@ export interface backendInterface {
     getUserProfile(token: string): Promise<ProfileResult>;
     getVideo(videoId: string): Promise<VideoRecord | null>;
     getVideosByCreator(creatorId: string): Promise<Array<VideoRecord>>;
+    getUserAllData(userId: string): Promise<any>;
+    getUserSubscriptions(userId: string): Promise<any[]>;
+    getUserSettings(userId: string): Promise<any>;
+    getWatchProgressAll(userId: string): Promise<any[]>;
+    saveUserData(token: string, watchLater: string[], history: any[], playlists: any[]): Promise<boolean>;
+    saveUserSubscriptions(token: string, subscriptions: any[]): Promise<boolean>;
+    saveWatchProgress(token: string, videoId: string, progressTime: number, durationSeconds: number): Promise<boolean>;
+    saveUserSettings(token: string, settings: any): Promise<boolean>;
+    updateUserExtra(token: string, username: string, avatarUrl: string): Promise<boolean>;
     incrementViewCount(videoId: string): Promise<boolean>;
     isCallerAdmin(): Promise<boolean>;
     loginUser(email: string, passwordHash: string): Promise<LoginResult>;
     logoutUser(token: string): Promise<void>;
+    refreshSession(refreshToken: string): Promise<RefreshResult>;
     registerUser(email: string, passwordHash: string, displayName: string): Promise<AuthResult>;
     searchVideos(searchTerm: string): Promise<Array<VideoRecord>>;
     toggleDislike(videoId: string, userId: string): Promise<boolean>;

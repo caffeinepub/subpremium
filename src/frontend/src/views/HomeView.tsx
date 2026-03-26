@@ -6,6 +6,7 @@ import { VideoCard } from "../components/VideoCard";
 import { useAuth } from "../hooks/useAuth";
 import { useUploadManager } from "../hooks/useUploadManager";
 import type { Video } from "../types/video";
+import { getSubscriptions } from "../utils/subscriptions";
 import { getWatchedPercent } from "../utils/watchProgress";
 
 interface HomeViewProps {
@@ -50,6 +51,27 @@ export function HomeView({
         v.description.toLowerCase().includes(q),
     );
   }, [readyVideos, searchQuery]);
+
+  // Continue Watching: videos between 3% and 95% watched
+  const continueWatching = useMemo(() => {
+    if (!userId) return [];
+    return readyVideos.filter((v) => {
+      const pct = getWatchedPercent(userId, v.id);
+      return pct > 3 && pct < 95;
+    });
+  }, [readyVideos, userId]);
+
+  // Subscriptions feed
+  const subscriptionVideos = useMemo(() => {
+    if (!userId) return [];
+    const subs = getSubscriptions(userId);
+    if (subs.length === 0) return [];
+    const subIds = new Set(subs.map((s) => s.creatorId));
+    return readyVideos
+      .filter((v) => subIds.has(v.creatorId))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 10);
+  }, [readyVideos, userId]);
 
   const allEmpty = pendingVideos.length === 0 && filteredReady.length === 0;
 
@@ -103,7 +125,7 @@ export function HomeView({
 
               const isCancelled =
                 stage === "error" && statusMsg === "Upload cancelled";
-              const isWaiting = false; // retries are silent
+              const isWaiting = false;
               const isProcessing = stage === "processing";
 
               const displayText = statusMsg
@@ -262,8 +284,89 @@ export function HomeView({
               );
             })}
 
-            {pendingVideos.length > 0 && filteredReady.length > 0 && (
-              <Separator className="bg-border my-2" />
+            {pendingVideos.length > 0 &&
+              (continueWatching.length > 0 ||
+                subscriptionVideos.length > 0 ||
+                filteredReady.length > 0) && (
+                <Separator className="bg-border my-2" />
+              )}
+
+            {/* Continue Watching */}
+            {userId && continueWatching.length > 0 && (
+              <div data-ocid="continue_watching.section" className="mb-4">
+                <p className="text-sm font-semibold text-foreground mb-2">
+                  Continue Watching
+                </p>
+                <div
+                  className="flex gap-3 overflow-x-auto pb-2"
+                  style={{
+                    scrollbarWidth: "none",
+                    msOverflowStyle: "none",
+                  }}
+                >
+                  {continueWatching.map((video, i) => {
+                    const pct = getWatchedPercent(userId, video.id);
+                    return (
+                      <button
+                        key={video.id}
+                        type="button"
+                        data-ocid={`continue_watching.item.${i + 1}`}
+                        onClick={() => onVideoClick(video)}
+                        className="flex-none w-[120px] text-left group"
+                      >
+                        <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-secondary">
+                          {video.thumbnailDataUrl ? (
+                            <img
+                              src={video.thumbnailDataUrl}
+                              alt={video.title}
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <FileVideo className="w-5 h-5 text-muted-foreground opacity-40" />
+                            </div>
+                          )}
+                          {/* Red progress bar */}
+                          <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40">
+                            <div
+                              className="h-full bg-red-500"
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                        <p className="text-xs text-foreground mt-1 truncate leading-snug">
+                          {video.title}
+                        </p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Subscriptions */}
+            {userId && subscriptionVideos.length > 0 && !searchQuery.trim() && (
+              <>
+                <div data-ocid="subscriptions.section" className="mb-4">
+                  <p className="text-sm font-semibold text-foreground mb-2">
+                    Subscriptions
+                  </p>
+                  {subscriptionVideos.map((video, i) => (
+                    <div key={video.id}>
+                      {i > 0 && <Separator className="bg-border my-2" />}
+                      <VideoCard
+                        video={video}
+                        onClick={onVideoClick}
+                        index={i + 1}
+                        watchedPercent={getWatchedPercent(userId, video.id)}
+                        onCreatorClick={onCreatorClick}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <Separator className="bg-border my-3" />
+              </>
             )}
 
             {filteredReady.map((video, i) => (

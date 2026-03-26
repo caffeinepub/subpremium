@@ -176,41 +176,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         if (result.__kind__ === "err") {
-          // Validation failed — try to silently refresh the token
-          if (cached.refreshToken) {
-            try {
-              const refreshResult = await withTimeout(
-                (actor as any).refreshSession?.(cached.refreshToken) ??
-                  Promise.reject("no refreshSession"),
-                3000,
-              );
-              if ((refreshResult as any)?.__kind__ === "ok") {
-                const {
-                  token: newToken,
-                  refreshToken: newRt,
-                  userId,
-                  displayName,
-                } = (refreshResult as any).ok;
-                const extras = getProfileExtras(userId);
-                const updatedUser: AuthUser = {
-                  ...cached.user,
-                  displayName,
-                  ...extras,
-                };
-                saveSession({
-                  accessToken: newToken,
-                  refreshToken: newRt || cached.refreshToken,
-                  userId,
-                  user: updatedUser,
-                  savedAt: Date.now(),
-                });
-                setUser(updatedUser);
-              }
-              // If refresh also fails: keep cached session, no logout
-            } catch {
-              // Refresh failed silently — keep cached session
-            }
-          }
+          // Validation failed — keep cached session alive, no logout
+          // Session stays until explicit logout
           return;
         }
         // result ok — session confirmed, update savedAt
@@ -274,12 +241,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (result.__kind__ === "err") {
           return result.err;
         }
-        const {
-          token,
-          refreshToken: rt,
-          userId,
-          displayName,
-        } = result.ok as any;
+        const { token, userId, displayName } = result.ok;
 
         // Hydrate all user data from backend BEFORE building authUser
         await withTimeout(
@@ -297,7 +259,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         };
         saveSession({
           accessToken: token,
-          refreshToken: rt || token,
+          refreshToken: token,
           userId,
           user: authUser,
           savedAt: Date.now(),
@@ -351,7 +313,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return null;
         }
 
-        const { token, refreshToken: signupRt, userId } = loginResult.ok as any;
+        const { token, userId } = loginResult.ok;
         const authUser: AuthUser = {
           userId,
           email: normalizedEmail,
@@ -359,7 +321,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         };
         saveSession({
           accessToken: token,
-          refreshToken: signupRt || token,
+          refreshToken: token,
           userId,
           user: authUser,
           savedAt: Date.now(),
@@ -479,34 +441,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (result !== null && result.__kind__ === "ok") {
             // Token still valid — update savedAt
             saveSession({ ...session, savedAt: Date.now() });
-          } else if (
-            result !== null &&
-            result.__kind__ === "err" &&
-            session.refreshToken
-          ) {
-            // Try silent token refresh
-            try {
-              const refreshResult = await withTimeout(
-                (actor as any).refreshSession?.(session.refreshToken) ??
-                  Promise.reject("no refreshSession"),
-                5000,
-              );
-              if ((refreshResult as any)?.__kind__ === "ok") {
-                const { token: newToken, refreshToken: newRt } = (
-                  refreshResult as any
-                ).ok;
-                saveSession({
-                  ...session,
-                  accessToken: newToken,
-                  refreshToken: newRt || session.refreshToken,
-                  savedAt: Date.now(),
-                });
-              }
-            } catch {
-              // Refresh failed silently — keep session
-            }
           }
-          // Any other failure: keep session as-is, never log out
+          // Failure or timeout: keep session as-is, never log out
         } catch {
           // Network issue — keep session as-is
         } finally {
@@ -552,19 +488,6 @@ export function getAuthToken(): string | null {
     }
     const old = localStorage.getItem("subpremium_session");
     if (old) return (JSON.parse(old) as { token: string }).token ?? null;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-export function getRefreshToken(): string | null {
-  try {
-    const raw = localStorage.getItem(SESSION_KEY);
-    if (raw) {
-      const auth = JSON.parse(raw) as PersistentAuth;
-      return auth.refreshToken ?? null;
-    }
     return null;
   } catch {
     return null;

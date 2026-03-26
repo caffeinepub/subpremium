@@ -145,7 +145,15 @@ function NotificationPopup({
 }
 
 function AppInner() {
-  const [currentView, setCurrentView] = useState<ViewName>("home");
+  const [currentView, setCurrentView] = useState<ViewName>(() => {
+    try {
+      const saved = localStorage.getItem(
+        "subpremium_lastview",
+      ) as ViewName | null;
+      if (saved && !AUTH_VIEWS.includes(saved)) return saved;
+    } catch {}
+    return "home";
+  });
   // prevView: the last non-auth view the user was on, used for post-login return
   const [prevView, setPrevView] = useState<ViewName>("home");
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
@@ -156,6 +164,7 @@ function AppInner() {
   const [searchQuery, setSearchQuery] = useState("");
   const [profileCreatorId, setProfileCreatorId] = useState("");
   const [profileCreatorName, setProfileCreatorName] = useState("");
+  const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const { settings } = useSettings();
   const { user } = useAuth();
   const { actor, isFetching } = useActor();
@@ -173,6 +182,25 @@ function AppInner() {
   useEffect(() => {
     applySettings(settings);
   }, [settings]);
+
+  // Persist current view to localStorage (skip auth views)
+  useEffect(() => {
+    if (!AUTH_VIEWS.includes(currentView)) {
+      localStorage.setItem("subpremium_lastview", currentView);
+    }
+  }, [currentView]);
+
+  // Online/offline state
+  useEffect(() => {
+    const on = () => setIsOffline(false);
+    const off = () => setIsOffline(true);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
 
   // Fetch videos from backend as soon as actor is ready — never wait on auth
   useEffect(() => {
@@ -390,6 +418,7 @@ function AppInner() {
               creatorName={profileCreatorName}
               onBack={() => setCurrentView("home")}
               onVideoClick={handleVideoClick}
+              currentUserId={user?.userId}
             />
           )}
 
@@ -469,6 +498,15 @@ function AppInner() {
             <DisplayView onBack={() => handleNavChange("menu")} />
           )}
         </main>
+
+        {/* Offline banner — thin strip at top, non-blocking */}
+        {isOffline && (
+          <div className="fixed top-0 left-0 right-0 z-[100] pointer-events-none">
+            <div className="bg-yellow-500/90 text-black text-xs font-medium text-center py-1">
+              You're offline
+            </div>
+          </div>
+        )}
 
         {showBottomNav && (
           <BottomNav current={currentView} onChange={handleNavChange} />

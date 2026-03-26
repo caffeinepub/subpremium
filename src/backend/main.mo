@@ -27,10 +27,20 @@ actor {
     createdAt : Int;
   };
 
+  // SessionRecord must remain compatible with the previous deployed shape
+  // (token, userId, expiresAt only). Refresh token data lives in a separate map.
   type SessionRecord = {
     token : Text;
     userId : Text;
     expiresAt : Int;
+  };
+
+  // Separate record for refresh token data (new stable map, no migration issue)
+  type RefreshRecord = {
+    refreshToken : Text;
+    accessToken : Text;
+    userId : Text;
+    refreshExpiresAt : Int;
   };
 
   type UserProfile = {
@@ -40,8 +50,9 @@ actor {
   };
 
   type AuthResult = { #ok : Text; #err : Text };
-  type LoginResult = { #ok : { token : Text; userId : Text; displayName : Text }; #err : Text };
+  type LoginResult = { #ok : { token : Text; refreshToken : Text; userId : Text; displayName : Text }; #err : Text };
   type ProfileResult = { #ok : UserProfile; #err : Text };
+  type RefreshResult = { #ok : { token : Text; refreshToken : Text; userId : Text; displayName : Text }; #err : Text };
 
   // Video types
   type Comment = {
@@ -74,7 +85,6 @@ actor {
     isPremium : Bool;
   };
 
-  // Video input types
   type VideoInput = {
     title : Text;
     description : Text;
@@ -93,7 +103,6 @@ actor {
     status : Text;
   };
 
-  // --- User data persistence types ---
   type HistoryEntry = {
     videoId : Text;
     watchedAt : Int;
@@ -111,6 +120,11 @@ actor {
     name : Text;
     videoIds : [Text];
     createdAt : Int;
+  };
+
+  type SubscriptionEntry = {
+    creatorId : Text;
+    creatorName : Text;
   };
 
   type UserData = {
@@ -138,43 +152,65 @@ actor {
     preferredLanguages : [Text];
   };
 
-  // --- Stable state ---
-
-  let usersByEmail = Map.empty<Text, UserRecord>();
-  let usersById = Map.empty<Text, UserRecord>();
-  let sessions = Map.empty<Text, SessionRecord>();
-  var tokenCounter : Nat = 0;
-  var videoCounter : Nat = 0;
-  var commentCounter : Nat = 0;
-
-  let videos = Map.empty<Text, VideoRecord>();
+  // --- STABLE state (persists across upgrades/deploys) ---
 
   // Kept for stable variable compatibility with previous deployment
-  let THIRTY_DAYS_NS : Int = 365 * 24 * 60 * 60 * 1_000_000_000;
-  let principalToUserId = Map.empty<Principal, Text>();
+  let THIRTY_DAYS_NS : Int = 30 * 24 * 60 * 60 * 1_000_000_000;
+
+  stable var usersByEmail = Map.empty<Text, UserRecord>();
+  stable var usersById = Map.empty<Text, UserRecord>();
+
+  // sessions uses the original SessionRecord shape (token, userId, expiresAt)
+  // DO NOT add fields here — use refreshSessions for new data
+  stable var sessions = Map.empty<Text, SessionRecord>();
+
+  // New map for refresh tokens (separate to avoid migration issues)
+  stable var refreshSessions = Map.empty<Text, RefreshRecord>();
+
+  stable var tokenCounter : Nat = 0;
+  stable var videoCounter : Nat = 0;
+  stable var commentCounter : Nat = 0;
+
+  stable var videos = Map.empty<Text, VideoRecord>();
+
+  stable var principalToUserId = Map.empty<Principal, Text>();
 
   let ONE_YEAR_NS : Int = 365 * 24 * 60 * 60 * 1_000_000_000;
+  let ACCESS_TOKEN_TTL : Int = 7 * 24 * 60 * 60 * 1_000_000_000; // 7 days
 
-  // User data maps
-  let userDataMap = Map.empty<Text, UserData>();
-  let watchProgressMap = Map.empty<Text, WatchProgressEntry>();
-  let userSettingsMap = Map.empty<Text, UserSettings>();
+  stable var userDataMap = Map.empty<Text, UserData>();
+  stable var userSubscriptionsMap = Map.empty<Text, [SubscriptionEntry]>();
+  stable var watchProgressMap = Map.empty<Text, WatchProgressEntry>();
+  stable var userSettingsMap = Map.empty<Text, UserSettings>();
 
   func makeToken() : Text {
     tokenCounter += 1;
     "sess_" # tokenCounter.toText() # "_" # Time.now().toText()
   };
 
-  // Validate session token and return userId, or null if invalid
+  func makeRefreshToken() : Text {
+    tokenCounter += 1;
+    "ref_" # tokenCounter.toText() # "_" # Time.now().toText()
+  };
+
+  // Validate access token — returns userId or null
   func validateToken(token : Text) : ?Text {
     switch (sessions.get(token)) {
       case null { null };
       case (?sess) {
-        if (Time.now() > sess.expiresAt) {
-          sessions.remove(token);
-          null
-        } else {
-          ?sess.userId
+        if (Time.now() > sess.expiresAt) { null } else { ?sess.userId }
+      };
+    }
+  };
+
+  // Get userId from token even if expired (for data writes with lenient auth)
+  func getUserIdFromToken(token : Text) : ?Text {
+    switch (validateToken(token)) {
+      case (?id) { ?id };
+      case null {
+        switch (sessions.get(token)) {
+          case null { null };
+          case (?sess) { ?sess.userId };
         }
       };
     }
@@ -209,22 +245,30 @@ actor {
           return #err("Invalid email or password");
         };
         let token = makeToken();
+        let refreshToken = makeRefreshToken();
         let session : SessionRecord = {
           token;
           userId = user.userId;
-          expiresAt = Time.now() + ONE_YEAR_NS;
+          expiresAt = Time.now() + ACCESS_TOKEN_TTL;
+        };
+        let refresh : RefreshRecord = {
+          refreshToken;
+          accessToken = token;
+          userId = user.userId;
+          refreshExpiresAt = Time.now() + ONE_YEAR_NS;
         };
         sessions.add(token, session);
-        #ok({ token; userId = user.userId; displayName = user.displayName })
+        refreshSessions.add(refreshToken, refresh);
+        #ok({ token; refreshToken; userId = user.userId; displayName = user.displayName })
       };
     }
   };
 
   public func validateSession(token : Text) : async ProfileResult {
-    switch (validateToken(token)) {
-      case null { return #err("Invalid or expired session") };
-      case (?userId) {
-        switch (usersById.get(userId)) {
+    switch (sessions.get(token)) {
+      case null { return #err("Invalid session") };
+      case (?sess) {
+        switch (usersById.get(sess.userId)) {
           case null { return #err("User not found") };
           case (?user) {
             #ok({ userId = user.userId; email = user.email; displayName = user.displayName })
@@ -234,7 +278,52 @@ actor {
     }
   };
 
+  // Refresh access token using refresh token
+  public shared func refreshSession(refreshToken : Text) : async RefreshResult {
+    switch (refreshSessions.get(refreshToken)) {
+      case null { return #err("Invalid refresh token") };
+      case (?ref) {
+        if (Time.now() > ref.refreshExpiresAt) {
+          refreshSessions.remove(refreshToken);
+          sessions.remove(ref.accessToken);
+          return #err("Refresh token expired");
+        };
+        // Remove old access token session
+        sessions.remove(ref.accessToken);
+        // Issue new tokens
+        let newToken = makeToken();
+        let newRefreshToken = makeRefreshToken();
+        let newSession : SessionRecord = {
+          token = newToken;
+          userId = ref.userId;
+          expiresAt = Time.now() + ACCESS_TOKEN_TTL;
+        };
+        let newRefresh : RefreshRecord = {
+          refreshToken = newRefreshToken;
+          accessToken = newToken;
+          userId = ref.userId;
+          refreshExpiresAt = Time.now() + ONE_YEAR_NS;
+        };
+        refreshSessions.remove(refreshToken);
+        sessions.add(newToken, newSession);
+        refreshSessions.add(newRefreshToken, newRefresh);
+        switch (usersById.get(ref.userId)) {
+          case null { #err("User not found") };
+          case (?user) {
+            #ok({ token = newToken; refreshToken = newRefreshToken; userId = user.userId; displayName = user.displayName })
+          };
+        }
+      };
+    }
+  };
+
   public func logoutUser(token : Text) : async () {
+    // Also clean up associated refresh session
+    for ((rk, rv) in refreshSessions.entries()) {
+      if (rv.accessToken == token) {
+        refreshSessions.remove(rk);
+      };
+    };
     sessions.remove(token);
   };
 
@@ -249,20 +338,11 @@ actor {
   };
 
   public shared func updateUserExtra(token : Text, username : Text, avatarUrl : Text) : async Bool {
-    switch (validateToken(token)) {
+    switch (getUserIdFromToken(token)) {
       case null { false };
       case (?userId) {
         let existing = switch (userDataMap.get(userId)) {
-          case null {
-            {
-              userId;
-              username = "";
-              avatarUrl = "";
-              watchLater = [];
-              history = [];
-              playlists = [];
-            }
-          };
+          case null { { userId; username = ""; avatarUrl = ""; watchLater = []; history = []; playlists = [] } };
           case (?d) { d };
         };
         userDataMap.add(userId, { existing with username; avatarUrl });
@@ -277,25 +357,36 @@ actor {
     history : [HistoryEntry],
     playlists : [PlaylistRecord],
   ) : async Bool {
-    switch (validateToken(token)) {
+    switch (getUserIdFromToken(token)) {
       case null { false };
       case (?userId) {
         let existing = switch (userDataMap.get(userId)) {
-          case null {
-            {
-              userId;
-              username = "";
-              avatarUrl = "";
-              watchLater = [];
-              history = [];
-              playlists = [];
-            }
-          };
+          case null { { userId; username = ""; avatarUrl = ""; watchLater = []; history = []; playlists = [] } };
           case (?d) { d };
         };
         userDataMap.add(userId, { existing with watchLater; history; playlists });
         true
       };
+    }
+  };
+
+  public shared func saveUserSubscriptions(
+    token : Text,
+    subscriptions : [SubscriptionEntry],
+  ) : async Bool {
+    switch (getUserIdFromToken(token)) {
+      case null { false };
+      case (?userId) {
+        userSubscriptionsMap.add(userId, subscriptions);
+        true
+      };
+    }
+  };
+
+  public query func getUserSubscriptions(userId : Text) : async [SubscriptionEntry] {
+    switch (userSubscriptionsMap.get(userId)) {
+      case null { [] };
+      case (?subs) { subs };
     }
   };
 
@@ -305,17 +396,11 @@ actor {
     progressTime : Float,
     durationSeconds : Float,
   ) : async Bool {
-    switch (validateToken(token)) {
+    switch (getUserIdFromToken(token)) {
       case null { false };
       case (?userId) {
         let key = userId # "_" # videoId;
-        let entry : WatchProgressEntry = {
-          videoId;
-          progressTime;
-          durationSeconds;
-          updatedAt = Time.now();
-        };
-        watchProgressMap.add(key, entry);
+        watchProgressMap.add(key, { videoId; progressTime; durationSeconds; updatedAt = Time.now() });
         true
       };
     }
@@ -329,12 +414,11 @@ actor {
       .toArray()
   };
 
-  // --- Video API (no principal-based auth — uses creatorId from input) ---
+  // --- Video API ---
 
   public shared func addVideo(videoInput : VideoInput) : async VideoRecord {
     videoCounter += 1;
     let videoId = videoCounter.toText();
-
     let video : VideoRecord = {
       videoId;
       title = videoInput.title;
@@ -356,7 +440,6 @@ actor {
       dislikedBy = [];
       isPremium = videoInput.isPremium;
     };
-
     videos.add(videoId, video);
     video;
   };
@@ -377,8 +460,7 @@ actor {
     switch (videos.get(input.videoId)) {
       case (null) { false };
       case (?video) {
-        let updatedVideo = { video with videoUrl = input.videoUrl; status = input.status };
-        videos.add(input.videoId, updatedVideo);
+        videos.add(input.videoId, { video with videoUrl = input.videoUrl; status = input.status });
         true;
       };
     };
@@ -387,14 +469,10 @@ actor {
   public shared func deleteVideo(videoId : Text) : async Bool {
     switch (videos.get(videoId)) {
       case (null) { false };
-      case (?_video) {
-        videos.remove(videoId);
-        true;
-      };
+      case (?_) { videos.remove(videoId); true };
     };
   };
 
-  // userId is passed explicitly (anonymous principal is unreliable for multi-user)
   public shared func toggleLike(videoId : Text, userId : Text) : async Bool {
     if (userId == "") { return false };
     switch (videos.get(videoId)) {
@@ -403,8 +481,7 @@ actor {
         let hasLiked = video.likedBy.find(func(id) { id == userId }).isSome();
         let updatedLikedBy = if (hasLiked) { video.likedBy.filter(func(id) { id != userId }) } else { video.likedBy.concat([userId]) };
         let updatedLikes = if (hasLiked) { video.likes - 1 } else { video.likes + 1 };
-        let updatedVideo = { video with likedBy = updatedLikedBy; likes = updatedLikes };
-        videos.add(videoId, updatedVideo);
+        videos.add(videoId, { video with likedBy = updatedLikedBy; likes = updatedLikes });
         true;
       };
     };
@@ -416,12 +493,9 @@ actor {
       case (null) { false };
       case (?video) {
         let hasDisliked = video.dislikedBy.find(func(id) { id == userId }).isSome();
-        let updatedDislikedBy = if (hasDisliked) { video.dislikedBy.filter(func(id) { id != userId }) } else {
-          video.dislikedBy.concat([userId]);
-        };
+        let updatedDislikedBy = if (hasDisliked) { video.dislikedBy.filter(func(id) { id != userId }) } else { video.dislikedBy.concat([userId]) };
         let updatedDislikes = if (hasDisliked) { video.dislikes - 1 } else { video.dislikes + 1 };
-        let updatedVideo = { video with dislikedBy = updatedDislikedBy; dislikes = updatedDislikes };
-        videos.add(videoId, updatedVideo);
+        videos.add(videoId, { video with dislikedBy = updatedDislikedBy; dislikes = updatedDislikes });
         true;
       };
     };
@@ -433,24 +507,18 @@ actor {
       case null { "Anonymous" };
       case (?user) { user.displayName };
     };
-
     switch (videos.get(videoId)) {
       case (null) { false };
       case (?video) {
         commentCounter += 1;
-        let commentId = commentCounter.toText();
-
         let comment : Comment = {
-          commentId;
+          commentId = commentCounter.toText();
           text;
           authorId = userId;
           authorName;
           createdAt = Time.now();
         };
-
-        let newComments = [comment].concat(video.comments);
-        let updatedVideo = { video with comments = newComments };
-        videos.add(videoId, updatedVideo);
+        videos.add(videoId, { video with comments = [comment].concat(video.comments) });
         true;
       };
     };
@@ -467,8 +535,7 @@ actor {
     switch (videos.get(videoId)) {
       case (null) { false };
       case (?video) {
-        let updatedVideo = { video with views = video.views + 1 };
-        videos.add(videoId, updatedVideo);
+        videos.add(videoId, { video with views = video.views + 1 });
         true;
       };
     };
@@ -481,7 +548,7 @@ actor {
   // --- User settings persistence ---
 
   public shared func saveUserSettings(token : Text, settings : UserSettings) : async Bool {
-    switch (validateToken(token)) {
+    switch (getUserIdFromToken(token)) {
       case null { false };
       case (?userId) {
         userSettingsMap.add(userId, settings);

@@ -5,12 +5,14 @@ import type { VideoRecord } from "../backend";
 import { useActor } from "../hooks/useActor";
 import type { Video } from "../types/video";
 import { formatViewsShort } from "../utils/format";
+import { isSubscribed, subscribe, unsubscribe } from "../utils/subscriptions";
 
 interface CreatorProfileViewProps {
   creatorId: string;
   creatorName: string;
   onBack: () => void;
   onVideoClick: (video: Video) => void;
+  currentUserId?: string;
 }
 
 function videoRecordToVideo(r: VideoRecord): Video {
@@ -56,16 +58,36 @@ function getUsername(name: string): string {
   return `@${name.toLowerCase().replace(/\s+/g, "")}`;
 }
 
+type TabType = "videos" | "playlists" | "community";
+
 export function CreatorProfileView({
   creatorId,
   creatorName,
   onBack,
   onVideoClick,
+  currentUserId,
 }: CreatorProfileViewProps) {
   const { actor, isFetching } = useActor();
   const [videos, setVideos] = useState<Video[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabType>("videos");
+  const [subscribed, setSubscribed] = useState(() =>
+    currentUserId ? isSubscribed(currentUserId, creatorId) : false,
+  );
+
+  const showSubscribeButton = !!currentUserId && currentUserId !== creatorId;
+
+  const handleSubscribeToggle = () => {
+    if (!currentUserId) return;
+    const next = !subscribed;
+    setSubscribed(next);
+    if (next) {
+      subscribe(currentUserId, creatorId, creatorName);
+    } else {
+      unsubscribe(currentUserId, creatorId);
+    }
+  };
 
   useEffect(() => {
     if (isFetching || !actor) return;
@@ -85,13 +107,17 @@ export function CreatorProfileView({
       })
       .finally(() => setLoading(false));
   }, [actor, isFetching, creatorId]);
-
   const initials = getInitials(creatorName);
   const username = getUsername(creatorName);
 
+  const tabs: { id: TabType; label: string }[] = [
+    { id: "videos", label: "Videos" },
+    { id: "playlists", label: "Playlists" },
+    { id: "community", label: "Community" },
+  ];
+
   return (
     <div className="animate-fade-in min-h-screen bg-background">
-      {/* Fixed header */}
       <header className="fixed top-0 left-0 right-0 z-50 bg-background/95 backdrop-blur-sm border-b border-border">
         <div className="flex items-center gap-3 px-3 py-3 max-w-md mx-auto">
           <button
@@ -111,9 +137,8 @@ export function CreatorProfileView({
         {/* Profile section */}
         <div
           data-ocid="profile.section"
-          className="flex flex-col items-center gap-3 px-4 pt-8 pb-6"
+          className="flex flex-col items-center gap-3 px-4 pt-8 pb-5"
         >
-          {/* Avatar */}
           <div
             data-ocid="profile.card"
             className="w-[72px] h-[72px] rounded-full bg-primary/20 flex items-center justify-center shrink-0"
@@ -122,50 +147,79 @@ export function CreatorProfileView({
             <span className="text-2xl font-bold text-primary">{initials}</span>
           </div>
 
-          {/* Name + username */}
           <div className="text-center">
             <p className="text-lg font-bold text-foreground leading-tight">
               {creatorName}
             </p>
             <p className="text-sm text-muted-foreground mt-0.5">{username}</p>
           </div>
+
+          {showSubscribeButton && (
+            <button
+              type="button"
+              data-ocid="profile.subscribe.button"
+              onClick={handleSubscribeToggle}
+              className={
+                subscribed
+                  ? "px-5 py-1.5 text-sm font-medium rounded-full border border-border text-muted-foreground hover:border-muted-foreground transition-colors"
+                  : "px-5 py-1.5 text-sm font-medium rounded-full bg-primary text-white hover:opacity-90 transition-opacity"
+              }
+            >
+              {subscribed ? "Subscribed \u2713" : "Subscribe"}
+            </button>
+          )}
         </div>
 
-        {/* Divider */}
-        <div className="h-px bg-border mx-4" />
+        {/* Tabs */}
+        <div className="flex border-b border-border">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              data-ocid={`profile.${tab.id}.tab`}
+              onClick={() => setActiveTab(tab.id)}
+              className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+                activeTab === tab.id
+                  ? "text-foreground border-b-2 border-primary"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
 
-        {/* Videos section */}
+        {/* Tab content */}
         <div className="px-4 pt-4 pb-24">
-          <h2 className="text-sm font-semibold text-foreground mb-3">Videos</h2>
-
-          {loading ? (
-            <div
-              data-ocid="profile.loading_state"
-              className="grid grid-cols-2 gap-2"
-            >
-              {[1, 2, 3, 4].map((i) => (
-                <div key={i} className="flex flex-col gap-2">
-                  <Skeleton className="w-full aspect-video rounded-lg" />
-                  <Skeleton className="w-3/4 h-3 rounded" />
-                  <Skeleton className="w-1/2 h-3 rounded" />
-                </div>
-              ))}
-            </div>
-          ) : error ? (
-            <div
-              data-ocid="profile.error_state"
-              className="flex flex-col items-center py-12 gap-2 text-center"
-            >
-              <p className="text-sm text-muted-foreground">
-                Failed to load videos
-              </p>
-              <button
-                type="button"
-                className="text-xs text-primary hover:underline"
-                onClick={() => {
-                  setLoading(true);
-                  setError(false);
-                  if (actor) {
+          {activeTab === "videos" &&
+            (loading ? (
+              <div
+                data-ocid="profile.loading_state"
+                className="grid grid-cols-2 gap-2"
+              >
+                {[1, 2, 3, 4].map((i) => (
+                  <div key={i} className="flex flex-col gap-2">
+                    <Skeleton className="w-full aspect-video rounded-lg" />
+                    <Skeleton className="w-3/4 h-3 rounded" />
+                    <Skeleton className="w-1/2 h-3 rounded" />
+                  </div>
+                ))}
+              </div>
+            ) : error ? (
+              <div
+                data-ocid="profile.error_state"
+                className="flex flex-col items-center py-12 gap-2 text-center"
+              >
+                <p className="text-sm text-muted-foreground">
+                  Failed to load videos
+                </p>
+                <button
+                  type="button"
+                  className="text-xs text-primary hover:underline"
+                  onClick={() => {
+                    if (!actor) return;
+                    setLoading(true);
+                    setError(false);
                     actor
                       .getVideosByCreator(creatorId)
                       .then((records) => {
@@ -177,78 +231,97 @@ export function CreatorProfileView({
                       })
                       .catch(() => setError(true))
                       .finally(() => setLoading(false));
-                  }
-                }}
-              >
-                Retry
-              </button>
-            </div>
-          ) : videos.length === 0 ? (
-            <div
-              data-ocid="profile.empty_state"
-              className="flex flex-col items-center py-16 gap-2 text-center"
-            >
-              <div className="w-14 h-14 rounded-2xl bg-secondary flex items-center justify-center mb-1">
-                <svg
-                  viewBox="0 0 48 48"
-                  className="w-7 h-7 text-muted-foreground opacity-50"
-                  aria-hidden="true"
+                  }}
                 >
-                  <polygon points="16,12 36,24 16,36" fill="currentColor" />
-                </svg>
-              </div>
-              <p className="text-sm font-semibold text-foreground">
-                No videos yet
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {creatorName} hasn't uploaded any videos
-              </p>
-            </div>
-          ) : (
-            <div data-ocid="profile.list" className="grid grid-cols-2 gap-3">
-              {videos.map((video, i) => (
-                <button
-                  key={video.id}
-                  type="button"
-                  data-ocid={`profile.item.${i + 1}`}
-                  onClick={() => onVideoClick(video)}
-                  className="text-left group"
-                >
-                  {/* Thumbnail */}
-                  <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-secondary">
-                    {video.thumbnailDataUrl ? (
-                      <img
-                        src={video.thumbnailDataUrl}
-                        alt={video.title}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                        loading="lazy"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center">
-                        <svg
-                          viewBox="0 0 48 48"
-                          className="w-8 h-8 text-muted-foreground opacity-30"
-                          aria-hidden="true"
-                        >
-                          <polygon
-                            points="16,12 36,24 16,36"
-                            fill="currentColor"
-                          />
-                        </svg>
-                      </div>
-                    )}
-                  </div>
-                  {/* Info */}
-                  <div className="mt-1.5">
-                    <p className="text-xs font-medium text-foreground line-clamp-2 leading-snug">
-                      {video.title}
-                    </p>
-                    <p className="text-[11px] text-muted-foreground mt-0.5">
-                      {formatViewsShort(video.views)} views
-                    </p>
-                  </div>
+                  Retry
                 </button>
-              ))}
+              </div>
+            ) : videos.length === 0 ? (
+              <div
+                data-ocid="profile.empty_state"
+                className="flex flex-col items-center py-16 gap-2 text-center"
+              >
+                <div className="w-14 h-14 rounded-2xl bg-secondary flex items-center justify-center mb-1">
+                  <svg
+                    viewBox="0 0 48 48"
+                    className="w-7 h-7 text-muted-foreground opacity-50"
+                    aria-hidden="true"
+                  >
+                    <polygon points="16,12 36,24 16,36" fill="currentColor" />
+                  </svg>
+                </div>
+                <p className="text-sm font-semibold text-foreground">
+                  No videos yet
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {creatorName} hasn&apos;t uploaded any videos
+                </p>
+              </div>
+            ) : (
+              <div data-ocid="profile.list" className="grid grid-cols-2 gap-3">
+                {videos.map((video, i) => (
+                  <button
+                    key={video.id}
+                    type="button"
+                    data-ocid={`profile.item.${i + 1}`}
+                    onClick={() => onVideoClick(video)}
+                    className="text-left group"
+                  >
+                    <div className="relative w-full aspect-video rounded-lg overflow-hidden bg-secondary">
+                      {video.thumbnailDataUrl ? (
+                        <img
+                          src={video.thumbnailDataUrl}
+                          alt={video.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <svg
+                            viewBox="0 0 48 48"
+                            className="w-8 h-8 text-muted-foreground opacity-30"
+                            aria-hidden="true"
+                          >
+                            <polygon
+                              points="16,12 36,24 16,36"
+                              fill="currentColor"
+                            />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                    <div className="mt-1.5">
+                      <p className="text-xs font-medium text-foreground line-clamp-2 leading-snug">
+                        {video.title}
+                      </p>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">
+                        {formatViewsShort(video.views)} views
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ))}
+
+          {activeTab === "playlists" && (
+            <div
+              data-ocid="profile.playlists.panel"
+              className="flex flex-col items-center justify-center py-16 text-center"
+            >
+              <p className="text-sm text-muted-foreground">
+                Playlists coming soon
+              </p>
+            </div>
+          )}
+
+          {activeTab === "community" && (
+            <div
+              data-ocid="profile.community.panel"
+              className="flex flex-col items-center justify-center py-16 text-center"
+            >
+              <p className="text-sm text-muted-foreground">
+                Community coming soon
+              </p>
             </div>
           )}
         </div>

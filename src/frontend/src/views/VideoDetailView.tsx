@@ -35,6 +35,7 @@ import type { Comment, Video } from "../types/video";
 import { StorageClient } from "../utils/StorageClient";
 import { formatTimeAgo, formatViewsShort } from "../utils/format";
 import { detectNetworkType } from "../utils/networkQuality";
+import { isSubscribed, subscribe, unsubscribe } from "../utils/subscriptions";
 import {
   addToHistory,
   incrementViews,
@@ -139,9 +140,9 @@ export function VideoDetailView({
   const [commentText, setCommentText] = useState("");
   const [currentVideo, setCurrentVideo] = useState<Video>(video);
   const [showDescription, setShowDescription] = useState(false);
-  const [subscribed, setSubscribed] = useState(() => {
-    return localStorage.getItem(`subpremium_subs_${video.creatorId}`) === "1";
-  });
+  const [subscribed, setSubscribed] = useState(() =>
+    isSubscribed(userId, video.creatorId),
+  );
   const mountedRef = useRef(false);
 
   // CC + Settings state
@@ -564,14 +565,21 @@ export function VideoDetailView({
   }, [hasSources, currentVideo.blobHash, currentVideo.sources, identity]);
 
   const handleSubscribe = useCallback(() => {
+    if (!isLoggedIn || !userId) return;
     const next = !subscribed;
     setSubscribed(next);
     if (next) {
-      localStorage.setItem(`subpremium_subs_${currentVideo.creatorId}`, "1");
+      subscribe(userId, currentVideo.creatorId, currentVideo.creatorName);
     } else {
-      localStorage.removeItem(`subpremium_subs_${currentVideo.creatorId}`);
+      unsubscribe(userId, currentVideo.creatorId);
     }
-  }, [subscribed, currentVideo.creatorId]);
+  }, [
+    subscribed,
+    isLoggedIn,
+    userId,
+    currentVideo.creatorId,
+    currentVideo.creatorName,
+  ]);
 
   const handleLike = useCallback(() => {
     if (!isLoggedIn || !userId) return;
