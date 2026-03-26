@@ -4,6 +4,7 @@ import type { VideoRecord } from "./backend";
 import { BottomNav } from "./components/BottomNav";
 import { Header } from "./components/Header";
 import { NotificationsPanel } from "./components/NotificationsPanel";
+import { UploadTray } from "./components/UploadTray";
 import { useActor } from "./hooks/useActor";
 import { AuthProvider } from "./hooks/useAuth";
 import { useAuth } from "./hooks/useAuth";
@@ -507,6 +508,8 @@ function AppInner() {
             </div>
           </div>
         )}
+
+        <UploadTray />
 
         {showBottomNav && (
           <BottomNav current={currentView} onChange={handleNavChange} />

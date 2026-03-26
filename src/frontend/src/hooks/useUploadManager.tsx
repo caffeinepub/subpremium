@@ -32,6 +32,7 @@ export interface UploadTask {
   statusMsg?: string;
   isSlowNetwork?: boolean;
   isPaused?: boolean;
+  title?: string;
 }
 
 interface StartUploadParams {
@@ -90,8 +91,9 @@ export function UploadManagerProvider({
   const pausedByUserRef = useRef<Set<string>>(new Set());
   const networkPausedRef = useRef<Set<string>>(new Set());
   const runnerActiveRef = useRef<Set<string>>(new Set());
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
 
-  // FIX 3: Track last real progress update timestamp per videoId
+  // Track last real progress update timestamp per videoId
   const lastProgressUpdateRef = useRef<Map<string, number>>(new Map());
 
   const updateTask = useCallback(
@@ -118,6 +120,7 @@ export function UploadManagerProvider({
     networkPausedRef.current.delete(videoId);
     runnerActiveRef.current.delete(videoId);
     lastProgressUpdateRef.current.delete(videoId);
+    abortControllersRef.current.delete(videoId);
   }, []);
 
   const runUpload = useCallback(
@@ -128,7 +131,7 @@ export function UploadManagerProvider({
 
       (async () => {
         try {
-          // FIX 1: Fresh uploads start at 1% with "Uploading... 1%"
+          // Fresh uploads start at 1%
           updateTask(videoId, {
             stage: "uploading",
             isPaused: false,
@@ -157,14 +160,6 @@ export function UploadManagerProvider({
             return;
           }
 
-          // Read file into memory for upload (required by StorageClient API)
-          const fileBytes = new Uint8Array(await params.file.arrayBuffer());
-
-          if (cancelledRef.current.has(videoId)) {
-            runnerActiveRef.current.delete(videoId);
-            return;
-          }
-
           const uploadStart = Date.now();
           let attempt = 0;
           const MAX_BACKOFF = 60_000;
@@ -176,38 +171,66 @@ export function UploadManagerProvider({
               runnerActiveRef.current.delete(videoId);
               return;
             }
-            if (pausedByUserRef.current.has(videoId)) {
-              await sleep(300);
-              continue;
-            }
 
             try {
-              const result = await sc.putFile(fileBytes, (pct: number) => {
-                if (cancelledRef.current.has(videoId)) return;
+              // Create a fresh AbortController for each attempt
+              const controller = new AbortController();
+              abortControllersRef.current.set(videoId, controller);
 
-                // FIX 3: Record timestamp of real progress update
-                lastProgressUpdateRef.current.set(videoId, Date.now());
+              const result = await sc.putBlob(
+                params.file,
+                (pct: number) => {
+                  if (cancelledRef.current.has(videoId)) return;
 
-                const elapsed = Date.now() - uploadStart;
-                const slow = elapsed > 20_000 && pct < 40;
+                  // Record timestamp of real progress update
+                  lastProgressUpdateRef.current.set(videoId, Date.now());
 
-                // FIX 2: Always show actual percentage, never "Preparing..."
-                let statusMsg: string;
-                if (slow && elapsed > 60_000)
-                  statusMsg = "Uploading... this may take time";
-                else statusMsg = `Uploading... ${pct}%`;
+                  const elapsed = Date.now() - uploadStart;
+                  const slow = elapsed > 20_000 && pct < 40;
 
-                updateTask(videoId, {
-                  progress: pct,
-                  stage: "uploading",
-                  isSlowNetwork: slow,
-                  statusMsg,
-                });
-              });
+                  let statusMsg: string;
+                  if (slow && elapsed > 60_000)
+                    statusMsg = "Uploading... this may take time";
+                  else statusMsg = `Uploading... ${pct}%`;
 
+                  updateTask(videoId, {
+                    progress: pct,
+                    stage: "uploading",
+                    isSlowNetwork: slow,
+                    statusMsg,
+                  });
+                },
+                controller.signal,
+              );
+
+              abortControllersRef.current.delete(videoId);
               finalHash = result.hash;
               break; // success
             } catch (err) {
+              abortControllersRef.current.delete(videoId);
+
+              // Handle abort (pause or cancel)
+              if (err instanceof DOMException && err.name === "AbortError") {
+                if (cancelledRef.current.has(videoId)) {
+                  runnerActiveRef.current.delete(videoId);
+                  return;
+                }
+                if (pausedByUserRef.current.has(videoId)) {
+                  // Wait until user resumes
+                  while (pausedByUserRef.current.has(videoId)) {
+                    if (cancelledRef.current.has(videoId)) {
+                      runnerActiveRef.current.delete(videoId);
+                      return;
+                    }
+                    await sleep(300);
+                  }
+                  // Resume: go back to top of outer loop
+                  attempt = 0; // reset backoff after deliberate pause
+                  continue;
+                }
+                // Abort from unknown reason — treat as retriable
+              }
+
               if (cancelledRef.current.has(videoId)) {
                 runnerActiveRef.current.delete(videoId);
                 return;
@@ -223,7 +246,7 @@ export function UploadManagerProvider({
                 err,
               );
 
-              // Silent retry
+              // Silent retry — keep progress visible
               updateTask(videoId, { stage: "uploading", isSlowNetwork: false });
               await sleep(delay);
             }
@@ -324,7 +347,7 @@ export function UploadManagerProvider({
     [updateTask, removeTask],
   );
 
-  // FIX 3: Failsafe — if no real progress update in 5s, slowly increment
+  // Failsafe — if no real progress update in 5s, slowly increment
   useEffect(() => {
     const interval = setInterval(() => {
       setUploadTasks((prev) => {
@@ -412,6 +435,7 @@ export function UploadManagerProvider({
             progress: 1,
             stage: "uploading",
             statusMsg: "Uploading... 1%",
+            title: session.title,
           });
           return next;
         });
@@ -471,6 +495,21 @@ export function UploadManagerProvider({
         return;
       }
 
+      // Prevent duplicate uploads (same filename + size)
+      const existingTaskIds = [...uploadParamsRef.current.keys()];
+      if (
+        existingTaskIds.some((id) => {
+          const p = uploadParamsRef.current.get(id);
+          return (
+            p?.file.name === params.file.name &&
+            p?.file.size === params.file.size
+          );
+        })
+      ) {
+        console.warn("[upload] duplicate upload prevented");
+        return;
+      }
+
       const totalChunks = Math.ceil(params.file.size / (5 * 1024 * 1024)) || 1;
 
       (async () => {
@@ -519,7 +558,6 @@ export function UploadManagerProvider({
         saveVideos([newVideo, ...existing]);
         onVideoAddedRef.current(newVideo);
 
-        // FIX 1: Start at 1% with "Uploading... 1%"
         setUploadTasks((prev) => {
           const next = new Map(prev);
           next.set(videoId, {
@@ -527,6 +565,7 @@ export function UploadManagerProvider({
             progress: 1,
             stage: "uploading",
             statusMsg: "Uploading... 1%",
+            title: params.title.trim(),
           });
           return next;
         });
@@ -556,6 +595,10 @@ export function UploadManagerProvider({
 
   const cancelUpload = useCallback(
     (videoId: string) => {
+      // Abort any in-flight upload
+      abortControllersRef.current.get(videoId)?.abort();
+      abortControllersRef.current.delete(videoId);
+
       cancelledRef.current.add(videoId);
       pausedByUserRef.current.delete(videoId);
       networkPausedRef.current.delete(videoId);
@@ -571,6 +614,8 @@ export function UploadManagerProvider({
   const pauseUpload = useCallback(
     (videoId: string) => {
       pausedByUserRef.current.add(videoId);
+      // Abort the current in-flight upload so the catch handler enters pause-wait
+      abortControllersRef.current.get(videoId)?.abort();
       updateTask(videoId, { isPaused: true, statusMsg: "Paused" });
     },
     [updateTask],
@@ -586,6 +631,8 @@ export function UploadManagerProvider({
         stage: "uploading",
         statusMsg: "Uploading...",
       });
+      // The pause-wait loop inside runUpload detects the removal from pausedByUserRef
+      // and continues the retry loop automatically — no need to call runUpload again.
     },
     [updateTask],
   );

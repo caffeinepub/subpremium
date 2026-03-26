@@ -26,6 +26,10 @@ async function withRetry<T>(operation: () => Promise<T>): Promise<T> {
     try {
       return await operation();
     } catch (error) {
+      // Never retry AbortError
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw error;
+      }
       lastError = error instanceof Error ? error : new Error(String(error));
 
       // Check if this error should be retried
@@ -353,6 +357,7 @@ interface UploadChunkParams {
   owner: string;
   projectId: string;
   httpHeaders: Headers;
+  signal?: AbortSignal;
 }
 
 class StorageGatewayClient {
@@ -378,6 +383,9 @@ class StorageGatewayClient {
     );
 
     return await withRetry(async () => {
+      if (params.signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
       // Use query parameters for metadata and raw bytes in body
       const queryParams = new URLSearchParams({
         owner_id: params.owner,
@@ -396,6 +404,7 @@ class StorageGatewayClient {
           "X-Caffeine-Project-ID": params.projectId,
         },
         body: params.chunkData as BodyInit,
+        signal: params.signal,
       });
 
       if (!response.ok) {
@@ -538,6 +547,67 @@ export class StorageClient {
     return { hash: hashString };
   }
 
+  /**
+   * Memory-safe upload: streams the file in 1MB chunks without ever loading
+   * the entire file into memory. Supports AbortSignal for pause/cancel.
+   */
+  public async putBlob(
+    blob: Blob,
+    onProgress?: (percentage: number) => void,
+    signal?: AbortSignal,
+  ): Promise<{ hash: string }> {
+    const httpHeaders: Headers = { "Content-Type": "application/json" };
+    const fileHeaders: Headers = {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": blob.size.toString(),
+    };
+
+    // Hashing phase = 0–10% of total progress
+    const { chunks, chunkHashes, blobHashTree } =
+      await this.processFileForUpload(
+        blob,
+        fileHeaders,
+        signal,
+        (hashPct: number) => {
+          onProgress?.(Math.round(hashPct * 0.1));
+        },
+      );
+
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    const blobRootHash = blobHashTree.tree.hash;
+    const hashString = blobRootHash.toShaString();
+
+    const certificateBytes = await this.getCertificate(hashString);
+
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    await this.storageGatewayClient.uploadBlobTree(
+      blobHashTree,
+      this.bucket,
+      blob.size,
+      this.backendCanisterId,
+      this.projectId,
+      certificateBytes,
+    );
+
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+    // Upload phase = 10–100% of total progress
+    await this.parallelUpload(
+      chunks,
+      chunkHashes,
+      blobRootHash,
+      httpHeaders,
+      onProgress
+        ? (pct: number) => onProgress(10 + Math.round(pct * 0.9))
+        : undefined,
+      signal,
+    );
+
+    return { hash: hashString };
+  }
+
   public async getDirectURL(hash: string): Promise<string> {
     if (!hash) {
       throw new Error("Hash must not be empty");
@@ -549,6 +619,8 @@ export class StorageClient {
   private async processFileForUpload(
     file: Blob,
     headers: Headers,
+    signal?: AbortSignal,
+    onHashProgress?: (pct: number) => void,
   ): Promise<{
     chunks: Blob[];
     chunkHashes: YHash[];
@@ -557,9 +629,11 @@ export class StorageClient {
     const chunks = this.createFileChunks(file);
     const chunkHashes: YHash[] = [];
     for (let i = 0; i < chunks.length; i++) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       const chunkData = new Uint8Array(await chunks[i].arrayBuffer());
       const hash = await YHash.fromChunk(chunkData);
       chunkHashes.push(hash);
+      onHashProgress?.(Math.round(((i + 1) / chunks.length) * 100));
     }
     const blobHashTree = await BlobHashTree.build(chunkHashes, headers);
     return { chunks, chunkHashes, blobHashTree };
@@ -571,9 +645,11 @@ export class StorageClient {
     blobRootHash: YHash,
     httpHeaders: Headers,
     onProgress: ((percentage: number) => void) | undefined,
+    signal?: AbortSignal,
   ): Promise<void> {
     let completedChunks = 0;
     const uploadSingleChunk = async (index: number): Promise<void> => {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       const chunkData = new Uint8Array(await chunks[index].arrayBuffer());
       const chunkHash = chunkHashes[index];
       await this.storageGatewayClient.uploadChunk({
@@ -585,6 +661,7 @@ export class StorageClient {
         owner: this.backendCanisterId,
         projectId: this.projectId,
         httpHeaders,
+        signal,
       });
       // Use atomic increment to avoid race conditions
       const currentCompleted = ++completedChunks;
