@@ -174,7 +174,7 @@ function AppInner() {
   const [profileCreatorName, setProfileCreatorName] = useState("");
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const { settings } = useSettings();
-  const { user } = useAuth();
+  const { user, factoryReset } = useAuth();
   const { actor, isFetching } = useActor();
   const { notifications, markAllRead, unreadCount } = useNotifications(
     user?.userId ?? "",
@@ -252,6 +252,14 @@ function AppInner() {
     setCurrentView("video");
     window.scrollTo(0, 0);
   }, []);
+
+  const handleFactoryReset = useCallback(async () => {
+    await factoryReset();
+    setCurrentView("login");
+    setSelectedVideo(null);
+    setVideos([]);
+    window.scrollTo(0, 0);
+  }, [factoryReset]);
 
   const handleBack = useCallback(() => {
     setCurrentView("home");
@@ -549,6 +557,7 @@ function AppInner() {
               onLoginClick={goToLogin}
               onSettingsClick={(page) => handleNavChange(page)}
               onCreatorDashboard={() => handleNavChange("creatorDashboard")}
+              onFactoryReset={handleFactoryReset}
             />
           )}
 

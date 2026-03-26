@@ -44,6 +44,7 @@ interface AuthContextValue {
     avatarUrl?: string,
   ) => Promise<string | null>;
   checkUsername: (username: string, skipUserId?: string) => boolean;
+  factoryReset: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -385,6 +386,55 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const factoryReset = useCallback(async () => {
+    try {
+      const session = getSession();
+      if (session?.accessToken) {
+        try {
+          const actor = await getBackendActor();
+          // deleteUserAccount may not exist on all backend versions
+          const actorAny = actor as unknown as {
+            deleteUserAccount?: (token: string) => Promise<boolean>;
+          };
+          if (actorAny.deleteUserAccount) {
+            await actorAny.deleteUserAccount(session.accessToken);
+          }
+        } catch {
+          // swallow backend errors
+        }
+      }
+    } catch {
+      // swallow
+    }
+    // Dispatch event so upload manager can abort active uploads
+    window.dispatchEvent(new Event("factory-reset"));
+    // Clear all client storage
+    try {
+      localStorage.clear();
+    } catch {}
+    try {
+      sessionStorage.clear();
+    } catch {}
+    // Delete IndexedDB databases
+    try {
+      if (indexedDB.databases) {
+        const dbs = await indexedDB.databases();
+        for (const db of dbs) {
+          if (db.name) indexedDB.deleteDatabase(db.name);
+        }
+      }
+    } catch {}
+    try {
+      indexedDB.deleteDatabase("upload-sessions");
+    } catch {}
+    // Clear service worker caches
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    } catch {}
+    setUser(null);
+  }, []);
+
   const checkUsername = useCallback(
     (username: string, skipUserId?: string): boolean => {
       const normalized = username.trim().toLowerCase();
@@ -531,6 +581,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         loginAsGuest,
         updateProfile,
         checkUsername,
+        factoryReset,
       },
     },
     children,

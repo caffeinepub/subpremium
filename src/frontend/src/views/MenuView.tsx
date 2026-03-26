@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import {
+  AlertTriangle,
   Camera,
   Check,
   ChevronRight,
@@ -26,6 +27,7 @@ import {
   X,
 } from "lucide-react";
 import { useRef, useState } from "react";
+import { ClearAllDataModal } from "../components/ClearAllDataModal";
 import { useAuth } from "../hooks/useAuth";
 
 type SettingsPage = "privacy" | "preferences" | "language" | "display";
@@ -34,6 +36,7 @@ interface MenuViewProps {
   onLoginClick: () => void;
   onSettingsClick: (page: SettingsPage) => void;
   onCreatorDashboard?: () => void;
+  onFactoryReset?: () => Promise<void>;
 }
 
 const SETTINGS_ITEMS: {
@@ -51,10 +54,12 @@ export function MenuView({
   onLoginClick,
   onSettingsClick,
   onCreatorDashboard,
+  onFactoryReset,
 }: MenuViewProps) {
   const { user, logout, updateProfile } = useAuth();
 
   const [isEditing, setIsEditing] = useState(false);
+  const [showClearModal, setShowClearModal] = useState(false);
   const [editName, setEditName] = useState("");
   const [editUsername, setEditUsername] = useState("");
   const [editError, setEditError] = useState("");
@@ -356,6 +361,17 @@ export function MenuView({
 
       {/* ── Logout / Sign In ── */}
       <Separator className="mb-4" />
+      {user && (
+        <Button
+          variant="ghost"
+          data-ocid="menu.clear_all_data.button"
+          onClick={() => setShowClearModal(true)}
+          className="w-full h-12 text-red-400 hover:text-red-300 hover:bg-red-500/10 font-semibold text-base gap-2 transition-colors"
+        >
+          <AlertTriangle className="w-4 h-4" />
+          Clear All Data
+        </Button>
+      )}
       {user ? (
         <Button
           variant="ghost"
@@ -376,6 +392,14 @@ export function MenuView({
           Sign In
         </Button>
       )}
+      <ClearAllDataModal
+        open={showClearModal}
+        onClose={() => setShowClearModal(false)}
+        onConfirm={async () => {
+          if (onFactoryReset) await onFactoryReset();
+          setShowClearModal(false);
+        }}
+      />
     </div>
   );
 }

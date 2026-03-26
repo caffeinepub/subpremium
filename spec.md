@@ -1,32 +1,29 @@
 # SubPremium
 
 ## Current State
-- Video cards have a trash icon (DeleteVideoButton) shown only to owners of ready videos
-- Backend has `updateVideoStatus` but no endpoint for editing title/description/thumbnail
-- No edit modal or hook exists
+Full-featured video platform with persistent auth, chunked uploads, video management, creator dashboard, and settings. MenuView has logout and settings. useAuth has logout(). useUploadManager has cancelUpload(). Backend has logoutUser and deleteVideo.
 
 ## Requested Changes (Diff)
 
 ### Add
-- `updateVideoMeta` backend endpoint: accepts videoId, title, description, thumbnailUrl; owner-only; does NOT touch video file, views, or stats
-- `useVideoEdit` hook: manages edit state, thumbnail upload, save logic, optimistic UI update
-- `EditVideoModal` component: modal with Title (required, max 100 chars), Description (optional, max 500 chars), Thumbnail (upload/preview), Save/Cancel
-- Replace standalone `DeleteVideoButton` with a `VideoCardMenu` (⋮ button) that shows Edit + Delete options for owners
+- `deleteUserAccount(token)` backend method: deletes user record, all their videos, all sessions, all user data (watchLater, history, playlists, subscriptions, watchProgress, settings)
+- `ClearAllDataModal` component: shows confirmation dialog with warning text, then executes full factory reset
+- "Clear All Data" danger button in MenuView (visible only when logged in)
 
 ### Modify
-- `HomeView`: use `VideoCardMenu` instead of `DeleteVideoButton`, pass `onVideoEdited` callback
-- `App.tsx`: handle `onVideoEdited` to update global video state instantly across all views
-- `backend.d.ts`: add `updateVideoMeta` signature
-- `backend/main.mo`: add `updateVideoMeta` function
+- `useAuth.ts`: expose `factoryReset()` that calls backend delete, clears all localStorage/sessionStorage, returns so App can redirect to login
+- `MenuView.tsx`: add "Clear All Data" button that opens the modal
+- `App.tsx`: pass `onFactoryReset` callback down to MenuView which navigates to login after reset
+- `backend.d.ts`: add `deleteUserAccount` signature
+- `main.mo`: add `deleteUserAccount` public method
 
 ### Remove
-- Direct usage of standalone `DeleteVideoButton` in favor of unified menu
+- Nothing removed
 
 ## Implementation Plan
-1. Add `updateVideoMeta` to backend (Motoko)
-2. Add `updateVideoMeta` to `backend.d.ts`
-3. Create `useVideoEdit` hook
-4. Create `EditVideoModal` component
-5. Create `VideoCardMenu` component (⋮ with Edit + Delete)
-6. Update `HomeView`, `CreatorDashboardView`, `CreatorProfileView` to use `VideoCardMenu`
-7. Update `App.tsx` to handle edit callbacks and propagate video updates globally
+1. Add `deleteUserAccount(token)` to main.mo — deletes user from usersByEmail+usersById, all their videos, their sessions, userData, subscriptions, watchProgress, settings
+2. Add signature to backend.d.ts
+3. Add `factoryReset()` to useAuth.ts — calls backend deleteUserAccount, aborts uploads via cancelUpload event, clears ALL client storage (localStorage, sessionStorage, caches, IndexedDB databases), calls setUser(null)
+4. Create ClearAllDataModal.tsx — AlertDialog with the required warning text, 2-step confirm (type or press button), calls factoryReset on confirm
+5. Add "Clear All Data" button in MenuView, wired to modal
+6. App.tsx: handle post-reset redirect to login via a reset callback prop

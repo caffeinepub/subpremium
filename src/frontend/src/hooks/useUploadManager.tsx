@@ -855,6 +855,20 @@ export function UploadManagerProvider({
     [updateTask],
   );
 
+  // Factory reset: abort all uploads when factory-reset event fires
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cancelUpload is stable
+  useEffect(() => {
+    const handleFactoryReset = () => {
+      for (const videoId of uploadTasks.keys()) {
+        cancelUpload(videoId);
+      }
+      uploadParamsRef.current = new Map();
+    };
+    window.addEventListener("factory-reset", handleFactoryReset);
+    return () =>
+      window.removeEventListener("factory-reset", handleFactoryReset);
+  }, [uploadTasks]);
+
   return (
     <UploadManagerContext.Provider
       value={{

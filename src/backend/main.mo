@@ -327,6 +327,67 @@ actor {
     sessions.remove(token);
   };
 
+  // Full account deletion — removes user, all their videos, sessions, and all user data
+  public shared func deleteUserAccount(token : Text) : async Bool {
+    let userIdOpt = getUserIdFromToken(token);
+    switch (userIdOpt) {
+      case null { return false };
+      case (?userId) {
+        // Get user record to find email
+        switch (usersById.get(userId)) {
+          case null { return false };
+          case (?user) {
+            // Delete all videos owned by this user
+            let userVideoIds : [Text] = videos.entries()
+              .filter(func((_k, v)) { v.creatorId == userId })
+              .map(func((k, _v)) { k })
+              .toArray();
+            for (videoId in userVideoIds.vals()) {
+              videos.remove(videoId);
+            };
+
+            // Delete all access sessions for this user
+            let sessionTokens : [Text] = sessions.entries()
+              .filter(func((_k, v)) { v.userId == userId })
+              .map(func((k, _v)) { k })
+              .toArray();
+            for (t in sessionTokens.vals()) {
+              sessions.remove(t);
+            };
+
+            // Delete all refresh sessions for this user
+            let refreshKeys : [Text] = refreshSessions.entries()
+              .filter(func((_k, v)) { v.userId == userId })
+              .map(func((k, _v)) { k })
+              .toArray();
+            for (rk in refreshKeys.vals()) {
+              refreshSessions.remove(rk);
+            };
+
+            // Delete user data
+            userDataMap.remove(userId);
+            userSubscriptionsMap.remove(userId);
+            userSettingsMap.remove(userId);
+
+            // Delete watch progress entries for this user
+            let progressKeys : [Text] = watchProgressMap.keys()
+              .filter(func(k) { k.startsWith(#text (userId # "_")) })
+              .toArray();
+            for (pk in progressKeys.vals()) {
+              watchProgressMap.remove(pk);
+            };
+
+            // Delete user records
+            usersByEmail.remove(user.email);
+            usersById.remove(userId);
+
+            true
+          };
+        }
+      };
+    }
+  };
+
   public func getUserProfile(token : Text) : async ProfileResult {
     await validateSession(token)
   };

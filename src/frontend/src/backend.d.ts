@@ -103,6 +103,7 @@ export interface backendInterface {
     addComment(videoId: string, text: string, userId: string): Promise<boolean>;
     addVideo(videoInput: VideoInput): Promise<VideoRecord>;
     assignCallerUserRole(user: Principal, role: UserRole): Promise<void>;
+    deleteUserAccount(token: string): Promise<boolean>;
     deleteVideo(videoId: string): Promise<boolean>;
     getAllVideos(): Promise<Array<VideoRecord>>;
     getCallerUserRole(): Promise<UserRole>;
