@@ -128,6 +128,7 @@ export interface backendInterface {
     searchVideos(searchTerm: string): Promise<Array<VideoRecord>>;
     toggleDislike(videoId: string, userId: string): Promise<boolean>;
     toggleLike(videoId: string, userId: string): Promise<boolean>;
+    updateVideoMeta(videoId: string, title: string, description: string, thumbnailUrl: string, requestingUserId: string): Promise<boolean>;
     updateVideoStatus(input: VideoUpdateInput): Promise<boolean>;
     validateSession(token: string): Promise<ProfileResult>;
 }

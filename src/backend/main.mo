@@ -557,6 +557,20 @@ actor {
     }
   };
 
+  public shared func updateVideoMeta(videoId : Text, title : Text, description : Text, thumbnailUrl : Text, requestingUserId : Text) : async Bool {
+    if (requestingUserId == "") { return false };
+    switch (videos.get(videoId)) {
+      case (null) { false };
+      case (?video) {
+        if (video.creatorId != requestingUserId) { return false };
+        let newTitle = if (title == "") { video.title } else { title };
+        let newThumb = if (thumbnailUrl == "") { video.thumbnailUrl } else { thumbnailUrl };
+        videos.add(videoId, { video with title = newTitle; description; thumbnailUrl = newThumb });
+        true;
+      };
+    };
+  };
+
   public query func getUserSettings(userId : Text) : async ?UserSettings {
     userSettingsMap.get(userId)
   };

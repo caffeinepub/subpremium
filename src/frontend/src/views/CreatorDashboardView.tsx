@@ -17,7 +17,7 @@ import {
   Video,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { DeleteVideoButton } from "../components/DeleteVideoButton";
+import { VideoCardMenu } from "../components/VideoCardMenu";
 import type { Video as VideoType } from "../types/video";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -57,6 +57,12 @@ interface CreatorDashboardViewProps {
   onBack: () => void;
   onVideoClick: (video: VideoType) => void;
   onVideoDeleted?: (videoId: string) => void;
+  onVideoEdit?: (
+    video: VideoType,
+    title: string,
+    description: string,
+    thumbnailUrl: string,
+  ) => void;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -109,11 +115,18 @@ function VideosTab({
   userId,
   onVideoClick,
   onVideoDeleted,
+  onVideoEdit,
 }: {
   userVideos: VideoType[];
   userId: string;
   onVideoClick: (v: VideoType) => void;
   onVideoDeleted?: (videoId: string) => void;
+  onVideoEdit?: (
+    video: VideoType,
+    title: string,
+    description: string,
+    thumbnailUrl: string,
+  ) => void;
 }) {
   if (userVideos.length === 0) {
     return (
@@ -154,10 +167,14 @@ function VideosTab({
                 <Video className="w-6 h-6 text-muted-foreground" />
               </div>
             )}
-            <DeleteVideoButton
+            <VideoCardMenu
               video={v}
               currentUserId={userId}
+              saving={false}
               onDelete={(id) => onVideoDeleted?.(id)}
+              onEdit={(title, desc, thumb) =>
+                onVideoEdit?.(v, title, desc, thumb)
+              }
             />
           </div>
           <div className="p-2">
@@ -785,6 +802,7 @@ export function CreatorDashboardView({
   onBack,
   onVideoClick,
   onVideoDeleted,
+  onVideoEdit,
 }: CreatorDashboardViewProps) {
   const userVideos = allVideos.filter(
     (v) => v.creatorId === userId && v.status === "ready",
@@ -858,6 +876,7 @@ export function CreatorDashboardView({
                 userId={userId}
                 onVideoClick={onVideoClick}
                 onVideoDeleted={onVideoDeleted}
+                onVideoEdit={onVideoEdit}
               />
             </TabsContent>
 

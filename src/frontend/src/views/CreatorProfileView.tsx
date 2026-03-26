@@ -2,7 +2,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { VideoRecord } from "../backend";
-import { DeleteVideoButton } from "../components/DeleteVideoButton";
+import { VideoCardMenu } from "../components/VideoCardMenu";
 import { useActor } from "../hooks/useActor";
 import type { Video } from "../types/video";
 import { formatViewsShort } from "../utils/format";
@@ -15,6 +15,12 @@ interface CreatorProfileViewProps {
   onVideoClick: (video: Video) => void;
   currentUserId?: string;
   onVideoDeleted?: (videoId: string) => void;
+  onVideoEdit?: (
+    video: Video,
+    title: string,
+    description: string,
+    thumbnailUrl: string,
+  ) => void;
 }
 
 function videoRecordToVideo(r: VideoRecord): Video {
@@ -69,6 +75,7 @@ export function CreatorProfileView({
   onVideoClick,
   currentUserId,
   onVideoDeleted,
+  onVideoEdit,
 }: CreatorProfileViewProps) {
   const { actor, isFetching } = useActor();
   const [videos, setVideos] = useState<Video[]>([]);
@@ -293,15 +300,19 @@ export function CreatorProfileView({
                             </svg>
                           </div>
                         )}
-                        <DeleteVideoButton
+                        <VideoCardMenu
                           video={video}
                           currentUserId={currentUserId}
+                          saving={false}
                           onDelete={(id) => {
                             setVideos((prev) =>
                               prev.filter((v) => v.id !== id),
                             );
                             onVideoDeleted?.(id);
                           }}
+                          onEdit={(title, desc, thumb) =>
+                            onVideoEdit?.(video, title, desc, thumb)
+                          }
                         />
                       </div>
                       <div className="mt-1.5">

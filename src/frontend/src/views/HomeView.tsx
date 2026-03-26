@@ -2,8 +2,8 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { FileVideo, Pause, Play, Upload, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import { DeleteVideoButton } from "../components/DeleteVideoButton";
 import { VideoCard } from "../components/VideoCard";
+import { VideoCardMenu } from "../components/VideoCardMenu";
 import { useAuth } from "../hooks/useAuth";
 import { useUploadManager } from "../hooks/useUploadManager";
 import type { Video } from "../types/video";
@@ -17,6 +17,12 @@ interface HomeViewProps {
   onUploadClick: () => void;
   onCreatorClick?: (creatorId: string, creatorName: string) => void;
   onVideoDeleted?: (videoId: string) => void;
+  onVideoEdit?: (
+    video: Video,
+    title: string,
+    description: string,
+    thumbnailUrl: string,
+  ) => void;
 }
 
 export function HomeView({
@@ -26,6 +32,7 @@ export function HomeView({
   onUploadClick,
   onCreatorClick,
   onVideoDeleted,
+  onVideoEdit,
 }: HomeViewProps) {
   const { uploadTasks, cancelUpload, pauseUpload, resumeUpload } =
     useUploadManager();
@@ -339,10 +346,14 @@ export function HomeView({
                               style={{ width: `${pct}%` }}
                             />
                           </div>
-                          <DeleteVideoButton
+                          <VideoCardMenu
                             video={video}
                             currentUserId={userId}
+                            saving={false}
                             onDelete={(id) => onVideoDeleted?.(id)}
+                            onEdit={(title, desc, thumb) =>
+                              onVideoEdit?.(video, title, desc, thumb)
+                            }
                           />
                         </div>
                         <p className="text-xs text-foreground mt-1 truncate leading-snug">
@@ -372,13 +383,15 @@ export function HomeView({
                         watchedPercent={getWatchedPercent(userId, video.id)}
                         onCreatorClick={onCreatorClick}
                       />
-                      <div className="absolute top-2 right-2 z-10">
-                        <DeleteVideoButton
-                          video={video}
-                          currentUserId={userId}
-                          onDelete={(id) => onVideoDeleted?.(id)}
-                        />
-                      </div>
+                      <VideoCardMenu
+                        video={video}
+                        currentUserId={userId}
+                        saving={false}
+                        onDelete={(id) => onVideoDeleted?.(id)}
+                        onEdit={(title, desc, thumb) =>
+                          onVideoEdit?.(video, title, desc, thumb)
+                        }
+                      />
                     </div>
                   ))}
                 </div>
@@ -398,13 +411,15 @@ export function HomeView({
                   watchedPercent={getWatchedPercent(userId, video.id)}
                   onCreatorClick={onCreatorClick}
                 />
-                <div className="absolute top-2 right-2 z-10">
-                  <DeleteVideoButton
-                    video={video}
-                    currentUserId={userId}
-                    onDelete={(id) => onVideoDeleted?.(id)}
-                  />
-                </div>
+                <VideoCardMenu
+                  video={video}
+                  currentUserId={userId}
+                  saving={false}
+                  onDelete={(id) => onVideoDeleted?.(id)}
+                  onEdit={(title, desc, thumb) =>
+                    onVideoEdit?.(video, title, desc, thumb)
+                  }
+                />
               </div>
             ))}
           </div>

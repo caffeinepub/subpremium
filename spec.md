@@ -1,29 +1,32 @@
-# SubPremium — Delete Video Feature
+# SubPremium
 
 ## Current State
-The backend has `deleteVideo(videoId)` that removes the video record from the stable map. The frontend has no delete button anywhere — not on the Creator Dashboard, Creator Profile view, or any video card. `handleVideoRemoved` exists in App.tsx and is wired to the upload system only (for cancelling in-progress uploads).
+- Video cards have a trash icon (DeleteVideoButton) shown only to owners of ready videos
+- Backend has `updateVideoStatus` but no endpoint for editing title/description/thumbnail
+- No edit modal or hook exists
 
 ## Requested Changes (Diff)
 
 ### Add
-- `useVideoDelete` hook: calls `actor.deleteVideo(videoId)`, removes from localStorage/sessionStorage caches, dispatches a global `video-deleted` event, then calls `onDeleted` callback. Restores video on failure and shows error toast.
-- `DeleteVideoButton` component: renders a trash icon button; only visible when `currentUserId === video.creatorId` and `video.status === 'ready'`. Shows a shadcn `AlertDialog` for confirmation before calling the hook.
-- Delete buttons on: `VideosTab` in `CreatorDashboardView`, `CreatorProfileView` video grid (owner-only), and `HomeView` video cards (owner-only).
-- App.tsx: pass `onVideoDeleted` callback to relevant views; listen for `video-deleted` event to remove from global `videos` state.
+- `updateVideoMeta` backend endpoint: accepts videoId, title, description, thumbnailUrl; owner-only; does NOT touch video file, views, or stats
+- `useVideoEdit` hook: manages edit state, thumbnail upload, save logic, optimistic UI update
+- `EditVideoModal` component: modal with Title (required, max 100 chars), Description (optional, max 500 chars), Thumbnail (upload/preview), Save/Cancel
+- Replace standalone `DeleteVideoButton` with a `VideoCardMenu` (⋮ button) that shows Edit + Delete options for owners
 
 ### Modify
-- `CreatorDashboardView.VideosTab`: add delete button (trash icon) per video card; accept `onVideoDeleted` prop and pass `userId` down.
-- `CreatorDashboardView` main: accept and pass `onVideoDeleted`.
-- `CreatorProfileView`: add delete button for own videos (when `currentUserId === creatorId`); accept `onVideoDeleted`.
-- `App.tsx`: wire `onVideoDeleted` to `handleVideoRemoved` + backend call; pass `actor` reference through.
+- `HomeView`: use `VideoCardMenu` instead of `DeleteVideoButton`, pass `onVideoEdited` callback
+- `App.tsx`: handle `onVideoEdited` to update global video state instantly across all views
+- `backend.d.ts`: add `updateVideoMeta` signature
+- `backend/main.mo`: add `updateVideoMeta` function
 
 ### Remove
-- Nothing removed.
+- Direct usage of standalone `DeleteVideoButton` in favor of unified menu
 
 ## Implementation Plan
-1. Create `src/frontend/src/hooks/useVideoDelete.ts` — encapsulates backend call, optimistic removal, rollback on error, cache cleanup, toast.
-2. Create `src/frontend/src/components/DeleteVideoButton.tsx` — trash icon + AlertDialog confirmation, calls `useVideoDelete`, owner-only visibility.
-3. Modify `CreatorDashboardView.tsx` — add `onVideoDeleted` prop, pass to `VideosTab`, render `DeleteVideoButton` on each card.
-4. Modify `CreatorProfileView.tsx` — add `onVideoDeleted` prop, render `DeleteVideoButton` on own video cards.
-5. Modify `App.tsx` — add `handleVideoDeleted` (calls backend + `handleVideoRemoved`), pass to `CreatorDashboardView` and `CreatorProfileView`.
-6. Also add delete option on `HomeView` video cards for own videos (owner-only).
+1. Add `updateVideoMeta` to backend (Motoko)
+2. Add `updateVideoMeta` to `backend.d.ts`
+3. Create `useVideoEdit` hook
+4. Create `EditVideoModal` component
+5. Create `VideoCardMenu` component (⋮ with Edit + Delete)
+6. Update `HomeView`, `CreatorDashboardView`, `CreatorProfileView` to use `VideoCardMenu`
+7. Update `App.tsx` to handle edit callbacks and propagate video updates globally

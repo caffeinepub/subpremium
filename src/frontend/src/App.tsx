@@ -352,6 +352,50 @@ function AppInner() {
     [actor],
   );
 
+  const handleVideoEditSave = useCallback(
+    async (
+      video: Video,
+      title: string,
+      description: string,
+      thumbnailUrl: string,
+    ) => {
+      const updated: Video = {
+        ...video,
+        title: title.trim(),
+        description: description.trim(),
+        thumbnailDataUrl: thumbnailUrl || video.thumbnailDataUrl,
+      };
+      setVideos((prev) => prev.map((v) => (v.id === video.id ? updated : v)));
+      setSelectedVideo((prev) => (prev?.id === video.id ? updated : prev));
+      if (actor) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const ok = await (actor as any).updateVideoMeta(
+            video.id,
+            title.trim(),
+            description.trim(),
+            thumbnailUrl,
+            user?.userId ?? "",
+          );
+          if (!ok) {
+            setVideos((prev) =>
+              prev.map((v) => (v.id === video.id ? video : v)),
+            );
+            setSelectedVideo((prev) => (prev?.id === video.id ? video : prev));
+            toast.error("Failed to save changes.");
+          } else {
+            toast.success("Video updated");
+          }
+        } catch {
+          setVideos((prev) => prev.map((v) => (v.id === video.id ? video : v)));
+          toast.error("Failed to save changes.");
+        }
+      } else {
+        toast.success("Video updated");
+      }
+    },
+    [actor, user],
+  );
   const handleLoginSuccess = useCallback(() => {
     // Always return to a safe non-auth view
     const dest = AUTH_VIEWS.includes(prevView) ? "home" : prevView;
@@ -452,6 +496,7 @@ function AppInner() {
               onUploadClick={() => handleNavChange("upload")}
               onCreatorClick={handleCreatorClick}
               onVideoDeleted={handleVideoDeleted}
+              onVideoEdit={handleVideoEditSave}
             />
           )}
 
@@ -476,6 +521,7 @@ function AppInner() {
               onVideoClick={handleVideoClick}
               currentUserId={user?.userId}
               onVideoDeleted={handleVideoDeleted}
+              onVideoEdit={handleVideoEditSave}
             />
           )}
 
@@ -514,6 +560,7 @@ function AppInner() {
               onBack={() => handleNavChange("menu")}
               onVideoClick={handleVideoClick}
               onVideoDeleted={handleVideoDeleted}
+              onVideoEdit={handleVideoEditSave}
             />
           )}
 
