@@ -109,7 +109,13 @@ export function CreatorProfileView({
         const mapped = records
           .map(videoRecordToVideo)
           .filter((v) => v.status === "ready");
-        setVideos(mapped);
+        const seen = new Set<string>();
+        const deduped = mapped.filter((v) => {
+          if (seen.has(v.id)) return false;
+          seen.add(v.id);
+          return true;
+        });
+        setVideos(deduped);
       })
       .catch((e) => {
         console.error("[profile] failed to fetch creator videos:", e);
@@ -234,10 +240,16 @@ export function CreatorProfileView({
                     actor
                       .getVideosByCreator(creatorId)
                       .then((records) => {
+                        const mapped2 = records
+                          .map(videoRecordToVideo)
+                          .filter((v) => v.status === "ready");
+                        const seen2 = new Set<string>();
                         setVideos(
-                          records
-                            .map(videoRecordToVideo)
-                            .filter((v) => v.status === "ready"),
+                          mapped2.filter((v) => {
+                            if (seen2.has(v.id)) return false;
+                            seen2.add(v.id);
+                            return true;
+                          }),
                         );
                       })
                       .catch(() => setError(true))

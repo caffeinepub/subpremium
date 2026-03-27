@@ -81,7 +81,7 @@ function sleep(ms: number): Promise<void> {
 
 const CHUNK_SIZE = 1024 * 1024; // 1 MB
 const FINALIZE_TIMEOUT_MS = 30_000; // 30s hard timeout for finalize call
-const FORCE_CHECK_AFTER_MS = 30_000; // if stuck at finalizing >30s, poll backend
+const FORCE_CHECK_AFTER_MS = 60_000; // if stuck at finalizing >60s, poll backend
 const PENDING_RETRY_AFTER_MS = 60_000; // retry pending finalize after 1 min
 const MAX_FINALIZE_FAILURES = 3;
 
@@ -146,6 +146,7 @@ export function UploadManagerProvider({
     >
   >(new Map());
   const forceCheckInFlightRef = useRef<Set<string>>(new Set());
+  const forceCheckCountRef = useRef<Map<string, number>>(new Map());
 
   // ─── helpers ──────────────────────────────────────────────────────────────
 
@@ -181,6 +182,7 @@ export function UploadManagerProvider({
     uploadParamsRef.current.delete(videoId);
     finalizeDataRef.current.delete(videoId);
     forceCheckInFlightRef.current.delete(videoId);
+    forceCheckCountRef.current.delete(videoId);
   }, []);
 
   // ─── completion helper ────────────────────────────────────────────────────
@@ -201,6 +203,7 @@ export function UploadManagerProvider({
       clearUploadFailureCount(videoId);
       finalizeDataRef.current.delete(videoId);
       finalizingStartTimeRef.current.delete(videoId);
+      forceCheckCountRef.current.delete(videoId);
       removeTask(videoId);
 
       if (userId) {
@@ -673,7 +676,27 @@ export function UploadManagerProvider({
             if (Date.now() - start > FORCE_CHECK_AFTER_MS) {
               // Reset timer before async check so we don't fire repeatedly
               finalizingStartTimeRef.current.set(videoId, Date.now());
-              forceStatusCheck(videoId);
+              const checkCount =
+                (forceCheckCountRef.current.get(videoId) ?? 0) + 1;
+              forceCheckCountRef.current.set(videoId, checkCount);
+              forceStatusCheck(videoId).then((ready) => {
+                if (!ready) {
+                  if (checkCount >= 3) {
+                    // After 3 failed checks (~3 minutes), mark as FAILED with retry
+                    updateTask(videoId, {
+                      stage: "failed",
+                      progress: 99,
+                      statusMsg: "Processing timed out — tap retry",
+                      canRetryFinalize: true,
+                    });
+                    finalizingStartTimeRef.current.delete(videoId);
+                    forceCheckCountRef.current.delete(videoId);
+                  }
+                } else {
+                  // Completed — clear count
+                  forceCheckCountRef.current.delete(videoId);
+                }
+              });
             }
             continue;
           }
@@ -720,7 +743,7 @@ export function UploadManagerProvider({
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [forceStatusCheck]);
+  }, [forceStatusCheck, updateTask]);
 
   // ─── mount: restore sessions ──────────────────────────────────────────────
   // biome-ignore lint/correctness/useExhaustiveDependencies: runs once on mount

@@ -59,20 +59,34 @@ export function HomeView({
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: isReady is a stable module-level function
-  const readyVideos = useMemo(
-    () => videos.filter((v) => isReady(v.status)),
-    [videos],
-  );
+  const readyVideos = useMemo(() => {
+    const seen = new Set<string>();
+    return videos.filter((v) => {
+      if (!isReady(v.status)) return false;
+      if (seen.has(v.id)) return false;
+      seen.add(v.id);
+      return true;
+    });
+  }, [videos]);
 
   const filteredReady = useMemo(() => {
-    if (!searchQuery.trim()) return readyVideos;
-    const q = searchQuery.toLowerCase();
-    return readyVideos.filter(
-      (v) =>
-        v.title.toLowerCase().includes(q) ||
-        v.creatorName.toLowerCase().includes(q) ||
-        v.description.toLowerCase().includes(q),
-    );
+    const base = searchQuery.trim()
+      ? readyVideos.filter((v) => {
+          const q = searchQuery.toLowerCase();
+          return (
+            v.title.toLowerCase().includes(q) ||
+            v.creatorName.toLowerCase().includes(q) ||
+            v.description.toLowerCase().includes(q)
+          );
+        })
+      : readyVideos;
+    // Deduplicate by videoId (readyVideos is already deduped but be safe)
+    const seen = new Set<string>();
+    return base.filter((v) => {
+      if (seen.has(v.id)) return false;
+      seen.add(v.id);
+      return true;
+    });
   }, [readyVideos, searchQuery]);
 
   // Continue Watching: videos between 3% and 95% watched

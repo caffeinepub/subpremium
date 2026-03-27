@@ -225,7 +225,12 @@ function AppInner() {
         const mapped = backendVideos.map(videoRecordToVideo);
         // Keep in-progress uploads from localStorage, replace ready videos with backend data
         const uploadingFromLS = getVideos().filter((v) => v.status !== "ready");
-        setVideos([...uploadingFromLS, ...mapped]);
+        const backendIds = new Set(mapped.map((v) => v.id));
+        // Remove in-progress uploads that the backend already reports as ready (orphan guard)
+        const dedupedUploading = uploadingFromLS.filter(
+          (v) => !backendIds.has(v.id),
+        );
+        setVideos([...dedupedUploading, ...mapped]);
       } catch (e) {
         console.error("[home] failed to fetch backend videos:", e);
         // Fallback: keep localStorage videos as-is
@@ -306,7 +311,10 @@ function AppInner() {
   }, []);
 
   const handleVideoAdded = useCallback((video: Video) => {
-    setVideos((prev) => [video, ...prev]);
+    setVideos((prev) => {
+      if (prev.some((v) => v.id === video.id)) return prev; // duplicate guard
+      return [video, ...prev];
+    });
   }, []);
 
   const handleVideoRemoved = useCallback((id: string) => {
