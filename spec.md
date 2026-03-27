@@ -1,47 +1,35 @@
 # SubPremium
 
 ## Current State
-- `Video` type has `status: 'uploading' | 'processing' | 'ready'`
-- `VideoRecord` in Motoko has `status: Text`, but no `previewFrameUrl` or `lowQualityUrl` fields
-- `isPublished` in backend only allows `ready/READY/PUBLIC/public` — excludes `processing`
-- `VideoCard` shows a spinner overlay when `status === 'processing'` but tapping still tries to open the player
-- `VideoDetailView` ignores processing status; always attempts to load the full video URL
-- No polling of video status while watching
-- No fallback playback (low-quality or preview-only) for processing videos
-- Home feed `readyVideos` does include `processing` videos, but player has no special handling
+`useUploadManager.tsx` has a `runFinalize` function that:
+- Makes one finalize attempt
+- On failure, checks backend once (forceStatusCheck)
+- Increments failure count and shows a manual Retry button after first failure
+- Shows Retry button too early — user sees it before system has exhausted retries
 
 ## Requested Changes (Diff)
 
 ### Add
-- `previewFrameUrl?: Text` and `lowQualityUrl?: Text` fields to `VideoRecord` and `VideoInput` in Motoko
-- Backend `getAllVideos` / `getVideo` must include processing-status videos in results (add `processing` to `isPublished`)
-- `Video` TS type: add `previewFrameUrl?: string` and `lowQualityUrl?: string`
-- `VideoCard`: show a "Processing" badge when `status === 'processing'`; keep existing tap behavior (allow tap)
-- `VideoDetailView`: tap-to-watch logic for processing videos:
-  - If `lowQualityUrl` exists → load and play it immediately
-  - Else if `previewFrameUrl` exists → show thumbnail in full-screen preview state
-  - Else → show processing screen (thumbnail, "Processing video...", spinner)
-  - Poll backend every 4s while `status !== 'ready'`; when HD becomes available seamlessly switch `<video>` src
-  - Show "HD ready soon" indicator while processing; hide badge once `status === 'ready'`
-  - NEVER load main `videoUrl` (HD) when status is processing
-- `videoMapper` (backend→frontend) must map new `previewFrameUrl` and `lowQualityUrl` fields
+- Silent auto-retry loop inside `runFinalize`: up to 3 attempts, exponential backoff (2s → 5s → 10s)
+- Backend truth check (`getVideo`) before every retry — if already READY, skip retry and complete instantly
+- Background recovery loop: after all retries exhausted, continue polling every 5–10s in the failsafe interval
+- Persist recovery state across page reloads via existing `saveFinalizePending` mechanism
+- Navigate user to Home as soon as upload session starts (dispatch `navigate-home` event)
+- Video appears in feed as PROCESSING immediately after upload completes
 
 ### Modify
-- Backend `isPublished` to also accept `"processing"` and `"PROCESSING"`
-- `VideoInput` type in Motoko to accept optional `previewFrameUrl` and `lowQualityUrl` (default to `""`)
-- `addVideo` to store those fields from input
-- `updateVideoStatus` (or a new `updateVideoUrls`) to allow setting `lowQualityUrl` and `previewFrameUrl` on an existing video
-- `VideoDetailView` player section: check `status === 'processing'` before mounting `<video>` element
+- `runFinalize`: replace single-attempt + manual retry with 3-attempt silent retry loop with backoff
+- Failsafe interval: reduce FORCE_CHECK_AFTER_MS from 60s to 8s for faster background recovery
+- Retry button: only shown if ALL 3 retries failed AND backend confirms video does NOT exist
+- `completeUpload`: remove processing stage — go directly to READY and remove card
 
 ### Remove
-- Nothing removed; existing spinner overlay on `VideoCard` can remain, just add the badge
+- Immediate `canRetryFinalize: true` after first failure
+- Hard failure after 3 failures that deletes the upload entirely (replace with background recovery)
 
 ## Implementation Plan
-1. Update Motoko `VideoRecord` and `VideoInput` with `previewFrameUrl` and `lowQualityUrl` fields
-2. Update `isPublished` to include `processing`
-3. Add/extend `updateVideoStatus` to support setting preview/low-quality URLs
-4. Update `backend.did.d.ts` bindings to reflect new fields
-5. Extend `Video` TS type with `previewFrameUrl` and `lowQualityUrl`
-6. Update videoMapper to map new backend fields
-7. Update `VideoCard` to show "Processing" badge for processing status
-8. Update `VideoDetailView`: implement tap-to-watch with fallback chain + status polling + seamless HD upgrade
+1. Update `runFinalize` to loop 3 retries with backoff and backend-check before each
+2. Update failsafe interval to poll FINALIZING tasks every 8s (not 60s)
+3. Only show Retry button when ALL retries exhausted AND backend getVideo returns null
+4. Dispatch `navigate-home` event when upload starts so UploadView returns user to Home
+5. Ensure processing video is visible in feed immediately

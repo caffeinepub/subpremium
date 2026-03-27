@@ -16,7 +16,6 @@ import {
   clearUploadFailureCount,
   deleteSession,
   getUploadFailureCount,
-  incrementUploadFailureCount,
   isUploadDeleted,
   loadAllSessions,
   loadSession,
@@ -81,9 +80,8 @@ function sleep(ms: number): Promise<void> {
 
 const CHUNK_SIZE = 1024 * 1024; // 1 MB
 const FINALIZE_TIMEOUT_MS = 30_000; // 30s hard timeout for finalize call
-const FORCE_CHECK_AFTER_MS = 60_000; // if stuck at finalizing >60s, poll backend
+const FORCE_CHECK_AFTER_MS = 8_000; // if stuck at finalizing >8s, poll backend
 const PENDING_RETRY_AFTER_MS = 60_000; // retry pending finalize after 1 min
-const MAX_FINALIZE_FAILURES = 3;
 
 function computeChunkBytes(
   chunkIndex: number,
@@ -364,74 +362,99 @@ export function UploadManagerProvider({
         return { url, captionsMeta };
       };
 
-      try {
-        const { url, captionsMeta } = await Promise.race([
-          doFinalize(),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error("finalize_timeout")),
-              FINALIZE_TIMEOUT_MS,
+      // ── SILENT AUTO-RETRY LOOP (up to 3 attempts) ──
+      const BACKOFF_DELAYS = [2000, 5000, 10000];
+      let finalizeSucceeded = false;
+
+      for (let attempt = 0; attempt <= 3; attempt++) {
+        if (attempt > 0) {
+          // Backend truth check before each retry
+          const alreadyReady = await forceStatusCheck(videoId);
+          if (alreadyReady) {
+            runnerActiveRef.current.delete(videoId);
+            return;
+          }
+          // Exponential backoff
+          await new Promise((res) =>
+            setTimeout(res, BACKOFF_DELAYS[attempt - 1] ?? 10000),
+          );
+        }
+
+        try {
+          const { url, captionsMeta } = await Promise.race([
+            doFinalize(),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error("finalize_timeout")),
+                FINALIZE_TIMEOUT_MS,
+              ),
             ),
-          ),
-        ]);
+          ]);
 
-        // ── SUCCESS — do NOT call saveFinalizePending on this path ──
-        finalizingStartTimeRef.current.delete(videoId);
-        const readyVideo: Video = {
-          ...video,
-          blobHash: finalHash,
-          status: "ready",
-          captions: captionsMeta.length > 0 ? captionsMeta : undefined,
-          sources: [{ quality: "Auto", url }],
-        };
-        completeUpload(videoId, readyVideo, params.title, params.userId);
-      } catch (err) {
-        // ── FAILURE / TIMEOUT ──
-        const isTimeout =
-          err instanceof Error && err.message === "finalize_timeout";
-        console.error(
-          `[upload] finalize ${isTimeout ? "timed out" : "failed"} for ${videoId}:`,
-          err,
-        );
+          // ── SUCCESS ──
+          finalizingStartTimeRef.current.delete(videoId);
+          const readyVideo: Video = {
+            ...video,
+            blobHash: finalHash,
+            status: "ready",
+            captions: captionsMeta.length > 0 ? captionsMeta : undefined,
+            sources: [{ quality: "Auto", url }],
+          };
+          completeUpload(videoId, readyVideo, params.title, params.userId);
+          finalizeSucceeded = true;
+          break;
+        } catch (err) {
+          console.warn(
+            `[upload] finalize attempt ${attempt + 1}/4 failed for ${videoId}:`,
+            err,
+          );
+          // Continue loop — DO NOT increment failure count or mark deleted
+        }
+      }
 
-        // Before recording failure, check if backend already processed it
+      if (!finalizeSucceeded) {
+        // All retries exhausted — final backend truth check
         const alreadyReady = await forceStatusCheck(videoId);
         if (alreadyReady) {
           runnerActiveRef.current.delete(videoId);
           return;
         }
 
-        // Only now — save pending so reload can retry
-        await saveFinalizePending(videoId, finalHash).catch(() => {});
+        // Check if video record exists on backend
+        let videoExists = false;
+        try {
+          const actor = await getBackendActor();
+          const result = await actor.getVideo(videoId);
+          videoExists = !!(result && (result as { videoId?: string }).videoId);
+        } catch (_e) {
+          // ignore
+        }
 
-        incrementUploadFailureCount(videoId);
-        const failCount = getUploadFailureCount(videoId);
+        // Save pending so background recovery can retry
+        await saveFinalizePending(videoId, finalHash).catch(() => {});
         runnerActiveRef.current.delete(videoId);
         finalizingStartTimeRef.current.delete(videoId);
 
-        if (failCount >= MAX_FINALIZE_FAILURES) {
-          markUploadDeleted(videoId);
-          await deleteSession(videoId);
-          finalizeDataRef.current.delete(videoId);
-          removeTask(videoId);
-          onVideoRemovedRef.current?.(videoId);
-          toast.error("Upload failed", {
-            description: `"${params.title}" could not be finalized after multiple attempts.`,
+        if (videoExists) {
+          // Video exists but not ready — keep "Processing" UI, background recovery will handle
+          updateTask(videoId, {
+            stage: "finalizing",
+            progress: 99,
+            statusMsg: "Processing video...",
+            canRetryFinalize: false,
           });
         } else {
-          const left = MAX_FINALIZE_FAILURES - failCount;
+          // Video not found — last resort: show retry
           updateTask(videoId, {
             stage: "failed",
             progress: 99,
-            statusMsg: isTimeout
-              ? `Timed out — ${left} ${left === 1 ? "retry" : "retries"} left`
-              : `Failed — ${left} ${left === 1 ? "retry" : "retries"} left`,
+            statusMsg: "Could not process video — tap retry",
             canRetryFinalize: true,
           });
         }
       }
     },
-    [updateTask, removeTask, completeUpload, forceStatusCheck],
+    [updateTask, completeUpload, forceStatusCheck],
   );
 
   // ─── runUpload ────────────────────────────────────────────────────────────
@@ -725,17 +748,16 @@ export function UploadManagerProvider({
               forceCheckCountRef.current.set(videoId, checkCount);
               forceStatusCheck(videoId).then((ready) => {
                 if (!ready) {
-                  if (checkCount >= 3) {
-                    // After 3 failed checks (~3 minutes), mark as FAILED with retry
+                  // After 5+ failed checks (~40s), show retry as last resort
+                  if (checkCount >= 5) {
                     updateTask(videoId, {
-                      stage: "failed",
+                      stage: "finalizing",
                       progress: 99,
-                      statusMsg: "Processing timed out — tap retry",
+                      statusMsg: "Processing video...",
                       canRetryFinalize: true,
                     });
-                    finalizingStartTimeRef.current.delete(videoId);
-                    forceCheckCountRef.current.delete(videoId);
                   }
+                  // Keep checking indefinitely — background recovery loop
                 } else {
                   // Completed — clear count
                   forceCheckCountRef.current.delete(videoId);
@@ -1140,6 +1162,9 @@ export function UploadManagerProvider({
         });
 
         runUpload(videoId, params, newVideo);
+
+        // Navigate user back to home so they can use the app while upload runs
+        window.dispatchEvent(new CustomEvent("navigate-home"));
       })();
     },
     [runUpload],

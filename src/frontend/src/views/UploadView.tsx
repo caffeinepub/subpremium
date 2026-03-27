@@ -131,6 +131,13 @@ export function UploadView({ onDone, onLoginClick }: UploadViewProps) {
     };
   }, [videoObjectUrl]);
 
+  // Navigate home when upload starts (background upload continues)
+  useEffect(() => {
+    const handler = () => onDone();
+    window.addEventListener("navigate-home", handler);
+    return () => window.removeEventListener("navigate-home", handler);
+  }, [onDone]);
+
   const handleFileSelect = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
