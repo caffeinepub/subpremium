@@ -509,8 +509,12 @@ actor {
     videos.get(videoId);
   };
 
+  func isPublished(status : Text) : Bool {
+    status == "ready" or status == "READY" or status == "PUBLIC" or status == "public"
+  };
+
   public query func getAllVideos() : async [VideoRecord] {
-    videos.values().toArray();
+    videos.values().filter(func(v) { isPublished(v.status) }).toArray();
   };
 
   public query func getVideosByCreator(creatorId : Text) : async [VideoRecord] {
@@ -603,7 +607,7 @@ actor {
   };
 
   public query func searchVideos(searchTerm : Text) : async [VideoRecord] {
-    videos.values().filter(func(video) { video.title.contains(#text searchTerm) }).toArray();
+    videos.values().filter(func(video) { isPublished(video.status) and video.title.contains(#text searchTerm) }).toArray();
   };
 
   // --- User settings persistence ---

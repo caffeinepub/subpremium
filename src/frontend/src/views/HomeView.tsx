@@ -25,6 +25,16 @@ interface HomeViewProps {
   ) => void;
 }
 
+// "Ready" means the video is playable — accept all case variants + PUBLIC
+function isReady(status: string): boolean {
+  return (
+    status === "ready" ||
+    status === "READY" ||
+    status === "PUBLIC" ||
+    status === "public"
+  );
+}
+
 export function HomeView({
   videos,
   searchQuery,
@@ -41,13 +51,16 @@ export function HomeView({
 
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
 
+  // Pending = video card has an ACTIVE upload task (never show stale backend statuses)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: isReady is a stable module-level function
   const pendingVideos = useMemo(
-    () => videos.filter((v) => v.status !== "ready"),
-    [videos],
+    () => videos.filter((v) => !isReady(v.status) && uploadTasks.has(v.id)),
+    [videos, uploadTasks],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: isReady is a stable module-level function
   const readyVideos = useMemo(
-    () => videos.filter((v) => v.status === "ready"),
+    () => videos.filter((v) => isReady(v.status)),
     [videos],
   );
 

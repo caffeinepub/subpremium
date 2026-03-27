@@ -13,11 +13,15 @@ import type { Video } from "../types/video";
 import { StorageClient } from "../utils/StorageClient";
 import { getBackendActor } from "../utils/backendActor";
 import {
+  clearUploadFailureCount,
   deleteSession,
+  getUploadFailureCount,
+  incrementUploadFailureCount,
   isUploadDeleted,
   loadAllSessions,
   loadSession,
   markUploadDeleted,
+  saveFinalizePending,
   saveSession,
   updateUploadProgress,
 } from "../utils/uploadPersistence";
@@ -32,11 +36,12 @@ import { addNotification } from "./useNotifications";
 export interface UploadTask {
   videoId: string;
   progress: number;
-  stage: "uploading" | "processing" | "error";
+  stage: "uploading" | "finalizing" | "processing" | "failed" | "error";
   statusMsg?: string;
   isSlowNetwork?: boolean;
   isPaused?: boolean;
   title?: string;
+  canRetryFinalize?: boolean;
 }
 
 interface StartUploadParams {
@@ -56,6 +61,7 @@ interface UploadManagerContextValue {
   cancelUpload: (videoId: string) => void;
   pauseUpload: (videoId: string) => void;
   resumeUpload: (videoId: string) => void;
+  retryFinalize: (videoId: string) => void;
 }
 
 const UploadManagerContext = createContext<UploadManagerContextValue | null>(
@@ -73,24 +79,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const CHUNK_SIZE = 1024 * 1024; // 1MB — must match StorageClient
+const CHUNK_SIZE = 1024 * 1024; // 1 MB
+const FINALIZE_TIMEOUT_MS = 30_000; // 30s hard timeout for finalize call
+const FORCE_CHECK_AFTER_MS = 30_000; // if stuck at finalizing >30s, poll backend
+const PENDING_RETRY_AFTER_MS = 60_000; // retry pending finalize after 1 min
+const MAX_FINALIZE_FAILURES = 3;
 
 function computeChunkBytes(
   chunkIndex: number,
   totalChunks: number,
   fileSize: number,
 ): number {
-  const isLast = chunkIndex === totalChunks - 1;
-  return isLast ? fileSize - chunkIndex * CHUNK_SIZE : CHUNK_SIZE;
+  return chunkIndex === totalChunks - 1
+    ? fileSize - chunkIndex * CHUNK_SIZE
+    : CHUNK_SIZE;
 }
 
 function bytesToProgress(uploadedBytes: number, totalFileSize: number): number {
   if (totalFileSize <= 0) return 100;
-  const p = Math.floor((uploadedBytes * 100) / totalFileSize);
-  return Math.min(p, 100);
+  return Math.min(Math.floor((uploadedBytes * 100) / totalFileSize), 100);
 }
 
-/** Verify a File object is accessible and has real content. */
 function isValidFile(file: unknown): file is File {
   return (
     file instanceof File && file.size > 0 && typeof file.slice === "function"
@@ -120,14 +129,25 @@ export function UploadManagerProvider({
   const networkPausedRef = useRef<Set<string>>(new Set());
   const runnerActiveRef = useRef<Set<string>>(new Set());
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
-
-  // Track last real progress update timestamp per videoId
   const lastProgressUpdateRef = useRef<Map<string, number>>(new Map());
-
-  // Confirmed uploaded bytes per videoId — single writer is runUpload
+  const uploadStartTimeRef = useRef<Map<string, number>>(new Map());
+  const finalizingStartTimeRef = useRef<Map<string, number>>(new Map());
   const uploadedBytesRef = useRef<Map<string, number>>(new Map());
-  // Current displayed progress per videoId — for monotonic guard
   const currentProgressRef = useRef<Map<string, number>>(new Map());
+  const finalizeDataRef = useRef<
+    Map<
+      string,
+      {
+        finalHash: string;
+        sc: StorageClient;
+        params: StartUploadParams;
+        video: Video;
+      }
+    >
+  >(new Map());
+  const forceCheckInFlightRef = useRef<Set<string>>(new Set());
+
+  // ─── helpers ──────────────────────────────────────────────────────────────
 
   const updateTask = useCallback(
     (videoId: string, patch: Partial<UploadTask>) => {
@@ -153,53 +173,303 @@ export function UploadManagerProvider({
     networkPausedRef.current.delete(videoId);
     runnerActiveRef.current.delete(videoId);
     lastProgressUpdateRef.current.delete(videoId);
+    uploadStartTimeRef.current.delete(videoId);
+    finalizingStartTimeRef.current.delete(videoId);
     abortControllersRef.current.delete(videoId);
     uploadedBytesRef.current.delete(videoId);
     currentProgressRef.current.delete(videoId);
     uploadParamsRef.current.delete(videoId);
+    finalizeDataRef.current.delete(videoId);
+    forceCheckInFlightRef.current.delete(videoId);
   }, []);
 
+  // ─── completion helper ────────────────────────────────────────────────────
+  // Called from both runFinalize (success path) and forceStatusCheck.
+  // Marks the video ready in local state and removes the upload card.
+
+  const completeUpload = useCallback(
+    (videoId: string, readyVideo: Video, title: string, userId?: string) => {
+      currentProgressRef.current.set(videoId, 100);
+      updateTask(videoId, {
+        progress: 100,
+        stage: "processing",
+        statusMsg: "Processing...",
+      });
+      updateVideo(readyVideo);
+      onVideoUpdateRef.current(readyVideo);
+      deleteSession(videoId).catch(() => {});
+      clearUploadFailureCount(videoId);
+      finalizeDataRef.current.delete(videoId);
+      finalizingStartTimeRef.current.delete(videoId);
+      removeTask(videoId);
+
+      if (userId) {
+        addNotification(userId, {
+          type: "upload",
+          title: "Upload complete",
+          message: `Your video "${title}" is ready to watch`,
+          videoId,
+        });
+      }
+
+      toast.success("Upload complete", {
+        description: `"${title}" is ready to watch`,
+        duration: 4000,
+        action: {
+          label: "Watch",
+          onClick: () =>
+            window.dispatchEvent(
+              new CustomEvent("open-video", { detail: { videoId } }),
+            ),
+        },
+      });
+    },
+    [updateTask, removeTask],
+  );
+
+  // ─── forceStatusCheck ────────────────────────────────────────────────────
+  // Query getVideo(videoId). If backend already has it ready, force-complete.
+  // Returns true if completed, false otherwise.
+
+  const forceStatusCheck = useCallback(
+    async (videoId: string): Promise<boolean> => {
+      if (forceCheckInFlightRef.current.has(videoId)) return false;
+      forceCheckInFlightRef.current.add(videoId);
+      try {
+        const backendActor = await getBackendActor();
+        const result = await backendActor.getVideo(videoId);
+        const record =
+          Array.isArray(result) && result.length > 0 ? result[0] : null;
+        if (
+          record &&
+          (record.status === "ready" || record.status === "READY")
+        ) {
+          const params = uploadParamsRef.current.get(videoId);
+          const vids = getVideos();
+          const existingVideo = vids.find((v) => v.id === videoId);
+          const readyVideo: Video = {
+            ...(existingVideo ?? {
+              id: videoId,
+              title: record.title ?? "",
+              description: record.description ?? "",
+              creatorName: record.creatorName ?? "Anonymous",
+              creatorId: record.creatorId ?? "anonymous",
+              blobHash: record.blobHash ?? "",
+              durationSeconds: Number(record.durationSeconds ?? 0),
+              fileSizeBytes: Number(record.fileSizeBytes ?? 0),
+              views: Number(record.views ?? 0),
+              likes: Number(record.likes ?? 0),
+              dislikes: Number(record.dislikes ?? 0),
+              createdAt: Number(record.createdAt ?? Date.now()),
+              comments: [],
+            }),
+            status: "ready",
+            sources: [{ quality: "Auto", url: record.videoUrl ?? "" }],
+          };
+          completeUpload(
+            videoId,
+            readyVideo,
+            record.title ?? params?.title ?? "Video",
+            params?.userId,
+          );
+          return true;
+        }
+      } catch (e) {
+        console.warn("[upload] forceStatusCheck failed:", e);
+      } finally {
+        forceCheckInFlightRef.current.delete(videoId);
+      }
+      return false;
+    },
+    [completeUpload],
+  );
+
+  // ─── runFinalize ─────────────────────────────────────────────────────────
+  // PRIMARY rule: call immediately after chunks are done.
+  // saveFinalizePending is ONLY called if this fails (network/timeout).
+
+  const runFinalize = useCallback(
+    async (
+      videoId: string,
+      finalHash: string,
+      sc: StorageClient,
+      params: StartUploadParams,
+      video: Video,
+    ) => {
+      // Store for retry (in-session)
+      finalizeDataRef.current.set(videoId, { finalHash, sc, params, video });
+
+      finalizingStartTimeRef.current.set(videoId, Date.now());
+      updateTask(videoId, {
+        stage: "finalizing",
+        progress: 99,
+        statusMsg: "Processing video...",
+        isSlowNetwork: false,
+        canRetryFinalize: false,
+      });
+
+      const doFinalize = async () => {
+        // Captions
+        const captionsMeta: Array<{ lang: string; url: string }> = [];
+        for (const entry of params.captions) {
+          if (!entry.lang.trim() || !entry.file) continue;
+          try {
+            const text = await entry.file.text();
+            const langKey = entry.lang.trim();
+            localStorage.setItem(`caption_content_${videoId}_${langKey}`, text);
+            captionsMeta.push({
+              lang: langKey,
+              url: `local:${videoId}:${langKey}`,
+            });
+          } catch (_e) {
+            // ignore caption errors
+          }
+        }
+
+        let url = "";
+        try {
+          url = await sc.getDirectURL(finalHash);
+        } catch (_e) {
+          // non-fatal — proceed with empty URL
+        }
+
+        const backendActor = await getBackendActor();
+        await backendActor.updateVideoStatus({
+          videoId,
+          status: "ready",
+          videoUrl: url,
+        });
+
+        return { url, captionsMeta };
+      };
+
+      try {
+        const { url, captionsMeta } = await Promise.race([
+          doFinalize(),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("finalize_timeout")),
+              FINALIZE_TIMEOUT_MS,
+            ),
+          ),
+        ]);
+
+        // ── SUCCESS — do NOT call saveFinalizePending on this path ──
+        finalizingStartTimeRef.current.delete(videoId);
+        const readyVideo: Video = {
+          ...video,
+          blobHash: finalHash,
+          status: "ready",
+          captions: captionsMeta.length > 0 ? captionsMeta : undefined,
+          sources: [{ quality: "Auto", url }],
+        };
+        completeUpload(videoId, readyVideo, params.title, params.userId);
+      } catch (err) {
+        // ── FAILURE / TIMEOUT ──
+        const isTimeout =
+          err instanceof Error && err.message === "finalize_timeout";
+        console.error(
+          `[upload] finalize ${isTimeout ? "timed out" : "failed"} for ${videoId}:`,
+          err,
+        );
+
+        // Before recording failure, check if backend already processed it
+        const alreadyReady = await forceStatusCheck(videoId);
+        if (alreadyReady) {
+          runnerActiveRef.current.delete(videoId);
+          return;
+        }
+
+        // Only now — save pending so reload can retry
+        await saveFinalizePending(videoId, finalHash).catch(() => {});
+
+        incrementUploadFailureCount(videoId);
+        const failCount = getUploadFailureCount(videoId);
+        runnerActiveRef.current.delete(videoId);
+        finalizingStartTimeRef.current.delete(videoId);
+
+        if (failCount >= MAX_FINALIZE_FAILURES) {
+          markUploadDeleted(videoId);
+          await deleteSession(videoId);
+          finalizeDataRef.current.delete(videoId);
+          removeTask(videoId);
+          onVideoRemovedRef.current?.(videoId);
+          toast.error("Upload failed", {
+            description: `"${params.title}" could not be finalized after multiple attempts.`,
+          });
+        } else {
+          const left = MAX_FINALIZE_FAILURES - failCount;
+          updateTask(videoId, {
+            stage: "failed",
+            progress: 99,
+            statusMsg: isTimeout
+              ? `Timed out — ${left} ${left === 1 ? "retry" : "retries"} left`
+              : `Failed — ${left} ${left === 1 ? "retry" : "retries"} left`,
+            canRetryFinalize: true,
+          });
+        }
+      }
+    },
+    [updateTask, removeTask, completeUpload, forceStatusCheck],
+  );
+
+  // ─── runUpload ────────────────────────────────────────────────────────────
+
   const runUpload = useCallback(
-    (videoId: string, params: StartUploadParams, video: Video) => {
+    (
+      videoId: string,
+      params: StartUploadParams,
+      video: Video,
+      skipToFinalize?: { finalHash: string; sc: StorageClient },
+    ) => {
       if (runnerActiveRef.current.has(videoId)) return;
       runnerActiveRef.current.add(videoId);
       cancelledRef.current.delete(videoId);
 
       (async () => {
         try {
-          // Guard: if already deleted by the time the runner starts, bail out
           if (isUploadDeleted(videoId) || cancelledRef.current.has(videoId)) {
             runnerActiveRef.current.delete(videoId);
             return;
           }
 
-          // Load persisted session to determine resume position from bytes (not chunk index)
+          // Fast path: skip chunk upload, jump straight to finalize
+          if (skipToFinalize) {
+            await runFinalize(
+              videoId,
+              skipToFinalize.finalHash,
+              skipToFinalize.sc,
+              params,
+              video,
+            );
+            runnerActiveRef.current.delete(videoId);
+            return;
+          }
+
           const initialSession = await loadSession(videoId);
           if (!initialSession) {
-            // Session was deleted between mount and runner start
             runnerActiveRef.current.delete(videoId);
             removeTask(videoId);
             return;
           }
 
-          const restoredBytes = initialSession?.uploadedBytes ?? 0;
+          const restoredBytes = initialSession.uploadedBytes ?? 0;
           uploadedBytesRef.current.set(videoId, restoredBytes);
-          const restoredProgress = bytesToProgress(
-            restoredBytes,
-            params.file.size,
+          const clampedProgress = Math.max(
+            1,
+            bytesToProgress(restoredBytes, params.file.size),
           );
-          const clampedRestoredProgress = Math.max(1, restoredProgress);
-          currentProgressRef.current.set(videoId, clampedRestoredProgress);
+          currentProgressRef.current.set(videoId, clampedProgress);
 
           updateTask(videoId, {
             stage: "uploading",
             isPaused: false,
-            progress: clampedRestoredProgress,
-            statusMsg: `Uploading... ${clampedRestoredProgress}%`,
+            progress: clampedProgress,
+            statusMsg: `Uploading... ${clampedProgress}%`,
           });
 
-          // Seed the failsafe timer so it doesn't fire immediately
           lastProgressUpdateRef.current.set(videoId, Date.now());
+          uploadStartTimeRef.current.set(videoId, Date.now());
 
           const config = await loadConfig();
           const agent = new HttpAgent({ host: config.backend_host } as any);
@@ -224,7 +494,7 @@ export function UploadManagerProvider({
           const MAX_BACKOFF = 60_000;
           let finalHash = "";
 
-          // Outer retry loop
+          // ── chunk upload loop ──
           while (true) {
             if (cancelledRef.current.has(videoId)) {
               runnerActiveRef.current.delete(videoId);
@@ -232,27 +502,22 @@ export function UploadManagerProvider({
             }
 
             try {
-              // Reload session on every attempt to get the latest position
-              const currentSession = await loadSession(videoId);
-              if (!currentSession) {
-                // Session was deleted mid-upload
+              const session = await loadSession(videoId);
+              if (!session) {
                 runnerActiveRef.current.delete(videoId);
                 return;
               }
 
               const fromChunk =
-                currentSession && currentSession.lastChunkIndex >= 0
-                  ? currentSession.lastChunkIndex + 1
-                  : 0;
+                session.lastChunkIndex >= 0 ? session.lastChunkIndex + 1 : 0;
               const resumeState =
-                currentSession?.blobHashTreeJSON && fromChunk > 0
+                session.blobHashTreeJSON && fromChunk > 0
                   ? {
                       fromChunk,
-                      treeJSON: JSON.parse(currentSession.blobHashTreeJSON),
+                      treeJSON: JSON.parse(session.blobHashTreeJSON),
                     }
                   : undefined;
 
-              // Create a fresh AbortController for each attempt
               const controller = new AbortController();
               abortControllersRef.current.set(videoId, controller);
 
@@ -260,16 +525,11 @@ export function UploadManagerProvider({
 
               const result = await (sc as any).putBlob(
                 params.file,
-                (pct: number) => {
+                (_pct: number) => {
                   if (cancelledRef.current.has(videoId)) return;
-
-                  // Record timestamp for slow-network detection only
                   lastProgressUpdateRef.current.set(videoId, Date.now());
-
-                  // Only used for slow network detection — do NOT update progress here
                   const elapsed = Date.now() - uploadStart;
-                  const slow = elapsed > 20_000 && pct < 40;
-                  if (slow && elapsed > 60_000) {
+                  if (elapsed > 60_000) {
                     updateTask(videoId, {
                       isSlowNetwork: true,
                       statusMsg: "Uploading... this may take time",
@@ -279,7 +539,6 @@ export function UploadManagerProvider({
                 controller.signal,
                 resumeState,
                 async (chunkIndex: number, treeJSON?: unknown) => {
-                  // Double-check: if deleted mid-chunk, stop writing
                   if (
                     cancelledRef.current.has(videoId) ||
                     isUploadDeleted(videoId)
@@ -287,48 +546,42 @@ export function UploadManagerProvider({
                     return;
 
                   if (treeJSON !== undefined) {
-                    // Tree build complete — save tree JSON but do NOT change uploadedBytes
-                    const currentBytes =
-                      uploadedBytesRef.current.get(videoId) ?? 0;
+                    const bytes = uploadedBytesRef.current.get(videoId) ?? 0;
                     await updateUploadProgress(
                       videoId,
-                      currentBytes,
+                      bytes,
                       -1,
                       JSON.stringify(treeJSON),
                     );
                     return;
                   }
 
-                  // A real chunk completed — update uploadedBytes
                   const chunkBytes = computeChunkBytes(
                     chunkIndex,
                     totalChunks,
                     params.file.size,
                   );
-                  const prevBytes = uploadedBytesRef.current.get(videoId) ?? 0;
+                  const prev = uploadedBytesRef.current.get(videoId) ?? 0;
                   const newBytes = Math.min(
-                    prevBytes + chunkBytes,
+                    prev + chunkBytes,
                     params.file.size,
                   );
                   uploadedBytesRef.current.set(videoId, newBytes);
-
-                  // Persist to IDB immediately
                   await updateUploadProgress(videoId, newBytes, chunkIndex);
 
-                  // Compute and apply progress (monotonic guard)
-                  const newProgress = bytesToProgress(
-                    newBytes,
-                    params.file.size,
+                  // Progress capped at 98 — 99 is reserved for FINALIZING
+                  const newPct = Math.min(
+                    bytesToProgress(newBytes, params.file.size),
+                    98,
                   );
-                  const current = currentProgressRef.current.get(videoId) ?? 0;
-                  if (newProgress < current) return; // monotonic guard — never go backward
-                  currentProgressRef.current.set(videoId, newProgress);
-
+                  const cur = currentProgressRef.current.get(videoId) ?? 0;
+                  if (newPct < cur) return; // monotonic guard
+                  currentProgressRef.current.set(videoId, newPct);
                   lastProgressUpdateRef.current.set(videoId, Date.now());
                   updateTask(videoId, {
-                    progress: newProgress,
+                    progress: newPct,
                     stage: "uploading",
-                    statusMsg: `Uploading... ${newProgress}%`,
+                    statusMsg: `Uploading... ${newPct}%`,
                     isSlowNetwork: false,
                   });
                 },
@@ -336,18 +589,16 @@ export function UploadManagerProvider({
 
               abortControllersRef.current.delete(videoId);
               finalHash = result.hash;
-              break; // success
+              break; // all chunks done
             } catch (err) {
               abortControllersRef.current.delete(videoId);
 
-              // Handle abort (pause or cancel)
               if (err instanceof DOMException && err.name === "AbortError") {
                 if (cancelledRef.current.has(videoId)) {
                   runnerActiveRef.current.delete(videoId);
                   return;
                 }
                 if (pausedByUserRef.current.has(videoId)) {
-                  // Wait until user resumes
                   while (pausedByUserRef.current.has(videoId)) {
                     if (cancelledRef.current.has(videoId)) {
                       runnerActiveRef.current.delete(videoId);
@@ -355,11 +606,9 @@ export function UploadManagerProvider({
                     }
                     await sleep(300);
                   }
-                  // Resume: go back to top of outer loop
-                  attempt = 0; // reset backoff after deliberate pause
+                  attempt = 0;
                   continue;
                 }
-                // Abort from unknown reason — treat as retriable
               }
 
               if (cancelledRef.current.has(videoId)) {
@@ -372,148 +621,92 @@ export function UploadManagerProvider({
                 1000 * 2 ** Math.min(attempt - 1, 6) + Math.random() * 1000,
                 MAX_BACKOFF,
               );
-              console.warn(
-                `[upload] attempt ${attempt} failed for ${videoId}:`,
-                err,
-              );
-
-              // Silent retry — show last known progress, do NOT change uploadedBytes
-              const retryProgress =
-                currentProgressRef.current.get(videoId) ?? 0;
+              const retryPct = currentProgressRef.current.get(videoId) ?? 0;
               updateTask(videoId, {
                 stage: "uploading",
                 isSlowNetwork: false,
-                statusMsg: `Uploading... ${retryProgress}%`,
+                statusMsg: `Uploading... ${retryPct}%`,
               });
               await sleep(delay);
             }
           }
+          // ── end chunk upload loop ──
 
           if (cancelledRef.current.has(videoId)) {
             runnerActiveRef.current.delete(videoId);
             return;
           }
 
-          // Completion lock
           uploadedBytesRef.current.set(videoId, params.file.size);
-          currentProgressRef.current.set(videoId, 100);
-          updateTask(videoId, {
-            progress: 100,
-            stage: "processing",
-            statusMsg: "Processing...",
-            isSlowNetwork: false,
-          });
-
-          // Upload captions
-          const captionsMeta: Array<{ lang: string; url: string }> = [];
-          for (const entry of params.captions) {
-            if (!entry.lang.trim() || !entry.file) continue;
-            try {
-              const text = await entry.file.text();
-              const langKey = entry.lang.trim();
-              localStorage.setItem(
-                `caption_content_${videoId}_${langKey}`,
-                text,
-              );
-              captionsMeta.push({
-                lang: langKey,
-                url: `local:${videoId}:${langKey}`,
-              });
-            } catch (e) {
-              console.error("[upload] caption read failed", e);
-            }
-          }
-
-          // Safely get the direct URL — never let this throw up to the outer catch
-          let url = "";
-          try {
-            url = await sc.getDirectURL(finalHash);
-          } catch (e) {
-            console.error("[upload] getDirectURL failed, using empty url:", e);
-            url = "";
-          }
-
-          try {
-            const backendActor = await getBackendActor();
-            await backendActor.updateVideoStatus({
-              videoId,
-              status: "ready",
-              videoUrl: url,
-            });
-          } catch (e) {
-            console.error("[upload] failed to update video status:", e);
-          }
-
-          const readyVideo: Video = {
-            ...video,
-            blobHash: finalHash,
-            status: "ready",
-            captions: captionsMeta.length > 0 ? captionsMeta : undefined,
-            sources: [{ quality: "Auto", url }],
-          };
-
-          updateVideo(readyVideo);
-          onVideoUpdateRef.current(readyVideo);
-          await deleteSession(videoId);
-          removeTask(videoId);
-
-          if (params.userId) {
-            addNotification(params.userId, {
-              type: "upload",
-              title: "Upload complete",
-              message: `Your video is ready to watch: "${params.title}"`,
-              videoId,
-            });
-          }
-
-          toast.success("Upload complete", {
-            description: `"${params.title}" is ready to watch`,
-            duration: 4000,
-            action: {
-              label: "Watch",
-              onClick: () => {
-                window.dispatchEvent(
-                  new CustomEvent("open-video", { detail: { videoId } }),
-                );
-              },
-            },
-          });
+          // Hand off to finalization — runnerActiveRef stays set until runFinalize exits
+          await runFinalize(videoId, finalHash, sc, params, video);
         } catch (err) {
           runnerActiveRef.current.delete(videoId);
           if (cancelledRef.current.has(videoId)) return;
-          console.error("[upload] fatal error:", err);
-          networkPausedRef.current.add(videoId);
-          const fatalProgress = currentProgressRef.current.get(videoId) ?? 0;
+          console.error("[upload] fatal error in runUpload:", err);
+          const p = currentProgressRef.current.get(videoId) ?? 0;
           updateTask(videoId, {
             stage: "uploading",
-            statusMsg: `Uploading... ${fatalProgress}%`,
+            statusMsg: `Uploading... ${p}%`,
             isSlowNetwork: false,
           });
         }
       })();
     },
-    [updateTask, removeTask],
+    [updateTask, removeTask, runFinalize],
   );
 
-  // Failsafe — if no real progress update in 5s, slowly increment (monotonic)
+  // ─── failsafe interval ────────────────────────────────────────────────────
+  // 1. Kill stuck-at-0% uploads after 10s
+  // 2. Nudge stalled progress every 5s (capped at 98)
+  // 3. Force status-check if stuck in FINALIZING for >30s
+
   useEffect(() => {
     const interval = setInterval(() => {
       setUploadTasks((prev) => {
         let changed = false;
         const next = new Map(prev);
         for (const [videoId, task] of prev) {
+          if (task.stage === "finalizing") {
+            const start =
+              finalizingStartTimeRef.current.get(videoId) ?? Date.now();
+            if (Date.now() - start > FORCE_CHECK_AFTER_MS) {
+              // Reset timer before async check so we don't fire repeatedly
+              finalizingStartTimeRef.current.set(videoId, Date.now());
+              forceStatusCheck(videoId);
+            }
+            continue;
+          }
+
           if (
             task.stage !== "uploading" ||
             task.isPaused ||
             cancelledRef.current.has(videoId)
           )
             continue;
+
           const lastUpdate = lastProgressUpdateRef.current.get(videoId) ?? 0;
-          if (Date.now() - lastUpdate > 5000 && task.progress < 99) {
-            const current =
+          const startTime =
+            uploadStartTimeRef.current.get(videoId) ?? lastUpdate;
+
+          if (task.progress <= 1 && Date.now() - startTime > 10_000) {
+            markUploadDeleted(videoId);
+            cancelledRef.current.add(videoId);
+            abortControllersRef.current.get(videoId)?.abort();
+            next.set(videoId, {
+              ...task,
+              stage: "failed",
+              statusMsg: "Upload stalled",
+            });
+            changed = true;
+            continue;
+          }
+
+          if (Date.now() - lastUpdate > 5000 && task.progress < 98) {
+            const cur =
               currentProgressRef.current.get(videoId) ?? task.progress;
-            const nudged = Math.min(current + 0.5, 99);
-            if (nudged <= current) continue; // never go backward (monotonic)
+            const nudged = Math.min(cur + 0.5, 98);
+            if (nudged <= cur) continue;
             currentProgressRef.current.set(videoId, nudged);
             next.set(videoId, {
               ...task,
@@ -526,43 +719,36 @@ export function UploadManagerProvider({
         return changed ? next : prev;
       });
     }, 1000);
-
     return () => clearInterval(interval);
-  }, []);
+  }, [forceStatusCheck]);
 
-  // On mount: restore IDB sessions and auto-resume
-  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once
+  // ─── mount: restore sessions ──────────────────────────────────────────────
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs once on mount
   useEffect(() => {
     (async () => {
-      // loadAllSessions applies: tombstone filter, status=DELETED filter,
-      // invalid record filter, and file blob validity filter.
       const sessions = await loadAllSessions();
 
-      // Purge stale "uploading" videos from localStorage that have no valid session.
-      // This cleans up ghost video cards left from previously deleted uploads.
-      const validSessionIds = new Set(sessions.map((s) => s.videoId));
-      const storedVideos = getVideos();
-      const ghostVideoIds = storedVideos
-        .filter((v) => v.status === "uploading" && !validSessionIds.has(v.id))
+      // Remove ghost video cards (status=uploading, no valid session)
+      const validIds = new Set(sessions.map((s) => s.videoId));
+      const stored = getVideos();
+      const ghosts = stored
+        .filter((v) => v.status === "uploading" && !validIds.has(v.id))
         .map((v) => v.id);
-      if (ghostVideoIds.length > 0) {
-        saveVideos(storedVideos.filter((v) => !ghostVideoIds.includes(v.id)));
-        for (const id of ghostVideoIds) {
+      if (ghosts.length > 0) {
+        saveVideos(stored.filter((v) => !ghosts.includes(v.id)));
+        for (const id of ghosts) {
           onVideoRemovedRef.current?.(id);
-          // Ensure these are tombstoned so they can't sneak back
           markUploadDeleted(id);
         }
       }
 
       if (sessions.length === 0) return;
 
-      const freshStoredVideos = getVideos();
+      const freshVideos = getVideos();
 
       for (const session of sessions) {
         const { videoId } = session;
 
-        // Belt-and-suspenders: re-check tombstone and file validity here
-        // even though loadAllSessions already filtered them.
         if (isUploadDeleted(videoId)) continue;
         if (!isValidFile(session.file)) {
           markUploadDeleted(videoId);
@@ -582,7 +768,7 @@ export function UploadManagerProvider({
           displayName: session.displayName,
         };
 
-        let video = freshStoredVideos.find((v) => v.id === videoId);
+        let video = freshVideos.find((v) => v.id === videoId);
         if (!video) {
           video = {
             id: videoId,
@@ -601,46 +787,122 @@ export function UploadManagerProvider({
             status: "uploading",
             comments: [],
           };
-          const existing = getVideos();
-          saveVideos([video, ...existing]);
+          saveVideos([video, ...getVideos()]);
           onVideoAddedRef.current(video);
         }
 
         uploadParamsRef.current.set(videoId, params);
 
-        // Restore progress from bytes — NOT from chunk index
-        const restoredBytes = session.uploadedBytes ?? 0;
-        const resumePct = Math.max(
-          1,
-          bytesToProgress(restoredBytes, session.file.size),
-        );
+        // Startup READY check: if backend already has the video as READY,
+        // delete the leftover session and skip restoration entirely.
+        try {
+          const backendActor = await getBackendActor();
+          const result = await backendActor.getVideo(videoId);
+          const record =
+            Array.isArray(result) && result.length > 0 ? result[0] : null;
+          if (
+            record &&
+            (record.status === "ready" || record.status === "READY")
+          ) {
+            // Video is already ready — clean up any stale session
+            markUploadDeleted(videoId);
+            deleteSession(videoId).catch(() => {});
+            clearUploadFailureCount(videoId);
+            // Remove the video from local uploading list if present
+            const stored2 = getVideos();
+            const existing = stored2.find((v) => v.id === videoId);
+            if (existing && existing.status !== "ready") {
+              saveVideos(
+                stored2.map((v) =>
+                  v.id === videoId ? { ...v, status: "ready" as const } : v,
+                ),
+              );
+            }
+            continue;
+          }
+        } catch (_e) {
+          // Backend check failed — proceed with normal restore
+        }
 
-        // Initialise refs so monotonic guard and failsafe have correct baseline
+        const isFinalizePending =
+          session.finalizePending === true && !!session.finalHash;
+
+        // If pending longer than 1 minute, stale — retry even if failure count is 0
+        const pendingAge = Date.now() - (session.createdAt ?? 0);
+        const shouldRetryImmediately =
+          isFinalizePending && pendingAge > PENDING_RETRY_AFTER_MS;
+
+        const restoredBytes = session.uploadedBytes ?? 0;
+        const resumePct = isFinalizePending
+          ? 99
+          : Math.max(1, bytesToProgress(restoredBytes, session.file.size));
+
         uploadedBytesRef.current.set(videoId, restoredBytes);
         currentProgressRef.current.set(videoId, resumePct);
+        uploadStartTimeRef.current.set(videoId, Date.now());
+        if (isFinalizePending) {
+          finalizingStartTimeRef.current.set(videoId, Date.now());
+        }
 
         setUploadTasks((prev) => {
           const next = new Map(prev);
           next.set(videoId, {
             videoId,
             progress: resumePct,
-            stage: "uploading",
-            statusMsg: `Uploading... ${resumePct}%`,
+            // Show "Processing video..." for pending, never "Uploading 99%"
+            stage: isFinalizePending ? "finalizing" : "uploading",
+            statusMsg: isFinalizePending
+              ? "Processing video..."
+              : `Uploading... ${resumePct}%`,
             title: session.title,
           });
           return next;
         });
 
         const delay = 300 + Math.random() * 400;
-        setTimeout(() => {
-          runUpload(videoId, params, video!);
-        }, delay);
+
+        if (isFinalizePending) {
+          setTimeout(
+            async () => {
+              // First: check if backend already processed during downtime
+              const alreadyReady = await forceStatusCheck(videoId);
+              if (alreadyReady) return;
+
+              // Not ready yet — re-run finalization
+              try {
+                const config = await loadConfig();
+                const agent = new HttpAgent({
+                  host: config.backend_host,
+                } as any);
+                if (config.backend_host?.includes("localhost")) {
+                  await agent.fetchRootKey().catch(console.error);
+                }
+                const sc = new StorageClient(
+                  config.bucket_name,
+                  config.storage_gateway_url,
+                  config.backend_canister_id,
+                  config.project_id,
+                  agent,
+                );
+                runUpload(videoId, params, video!, {
+                  finalHash: session.finalHash!,
+                  sc,
+                });
+              } catch (e) {
+                console.error("[upload] finalize resume setup failed:", e);
+              }
+            },
+            shouldRetryImmediately ? 500 : delay,
+          );
+        } else {
+          setTimeout(() => runUpload(videoId, params, video!), delay);
+        }
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Online / offline handling
+  // ─── online / offline ─────────────────────────────────────────────────────
+
   useEffect(() => {
     const handleOffline = () => {
       setUploadTasks((prev) => {
@@ -648,11 +910,10 @@ export function UploadManagerProvider({
         for (const [id, task] of prev) {
           if (task.stage === "uploading" && !task.isPaused) {
             networkPausedRef.current.add(id);
-            const offlineProgress =
-              currentProgressRef.current.get(id) ?? task.progress;
+            const p = currentProgressRef.current.get(id) ?? task.progress;
             next.set(id, {
               ...task,
-              statusMsg: `Uploading... ${Math.round(offlineProgress)}%`,
+              statusMsg: `Uploading... ${Math.round(p)}%`,
             });
           }
         }
@@ -661,20 +922,17 @@ export function UploadManagerProvider({
     };
 
     const handleOnline = () => {
-      const toResume = Array.from(networkPausedRef.current).filter(
-        (id) => !pausedByUserRef.current.has(id),
-      );
-      for (const videoId of toResume) {
+      for (const videoId of Array.from(networkPausedRef.current)) {
+        if (pausedByUserRef.current.has(videoId)) continue;
         networkPausedRef.current.delete(videoId);
         runnerActiveRef.current.delete(videoId);
         const params = uploadParamsRef.current.get(videoId);
-        const vids = getVideos();
-        const video = vids.find((v) => v.id === videoId);
+        const video = getVideos().find((v) => v.id === videoId);
         if (!params || !video) continue;
-        const onlineProgress = currentProgressRef.current.get(videoId) ?? 0;
+        const p = currentProgressRef.current.get(videoId) ?? 0;
         updateTask(videoId, {
           stage: "uploading",
-          statusMsg: `Uploading... ${onlineProgress}%`,
+          statusMsg: `Uploading... ${p}%`,
         });
         setTimeout(() => runUpload(videoId, params, video), 1500);
       }
@@ -688,23 +946,19 @@ export function UploadManagerProvider({
     };
   }, [runUpload, updateTask]);
 
+  // ─── public API ───────────────────────────────────────────────────────────
+
   const startUpload = useCallback(
     (params: StartUploadParams) => {
-      if (!params.file) {
-        console.warn("[upload] no file provided");
-        return;
-      }
+      if (!params.file) return;
 
-      // Prevent duplicate uploads (same filename + size)
-      const existingTaskIds = [...uploadParamsRef.current.keys()];
+      // Deduplicate by name + size
       if (
-        existingTaskIds.some((id) => {
-          const p = uploadParamsRef.current.get(id);
-          return (
-            p?.file.name === params.file.name &&
-            p?.file.size === params.file.size
-          );
-        })
+        [...uploadParamsRef.current.values()].some(
+          (p) =>
+            p.file.name === params.file.name &&
+            p.file.size === params.file.size,
+        )
       ) {
         console.warn("[upload] duplicate upload prevented");
         return;
@@ -714,10 +968,9 @@ export function UploadManagerProvider({
 
       (async () => {
         let videoId: string = crypto.randomUUID();
-
         try {
-          const backendActor = await getBackendActor();
-          const videoRecord = await backendActor.addVideo({
+          const actor = await getBackendActor();
+          const rec = await actor.addVideo({
             title: params.title.trim(),
             description: params.description.trim(),
             creatorId: params.userId || "anonymous",
@@ -728,12 +981,9 @@ export function UploadManagerProvider({
             fileSizeBytes: BigInt(params.file.size),
             isPremium: false,
           });
-          videoId = videoRecord.videoId;
+          videoId = rec.videoId;
         } catch (e) {
-          console.warn(
-            "[upload] failed to register in backend, using local id:",
-            e,
-          );
+          console.warn("[upload] failed to register in backend:", e);
         }
 
         const newVideo: Video = {
@@ -754,13 +1004,13 @@ export function UploadManagerProvider({
           comments: [],
         };
 
-        const existing = getVideos();
-        saveVideos([newVideo, ...existing]);
+        saveVideos([newVideo, ...getVideos()]);
         onVideoAddedRef.current(newVideo);
 
-        // Initialise monotonic refs before first task creation
         uploadedBytesRef.current.set(videoId, 0);
         currentProgressRef.current.set(videoId, 1);
+        uploadStartTimeRef.current.set(videoId, Date.now());
+        lastProgressUpdateRef.current.set(videoId, Date.now());
 
         setUploadTasks((prev) => {
           const next = new Map(prev);
@@ -775,7 +1025,6 @@ export function UploadManagerProvider({
         });
 
         uploadParamsRef.current.set(videoId, params);
-
         saveSession({
           videoId,
           file: params.file,
@@ -800,37 +1049,22 @@ export function UploadManagerProvider({
 
   const cancelUpload = useCallback(
     (videoId: string) => {
-      // 1. Synchronous tombstone FIRST — immediately blocks reload re-hydration
       markUploadDeleted(videoId);
-
-      // 2. Abort any in-flight request
       abortControllersRef.current.get(videoId)?.abort();
       abortControllersRef.current.delete(videoId);
-
-      // 3. Mark as cancelled so runUpload runner exits on next check
       cancelledRef.current.add(videoId);
       pausedByUserRef.current.delete(videoId);
       networkPausedRef.current.delete(videoId);
-
-      // 4. Remove from in-memory queue so it can't be referenced
       uploadParamsRef.current.delete(videoId);
-
-      // 5. Clean up caption localStorage entries
-      const keys = Object.keys(localStorage).filter((k) =>
+      finalizeDataRef.current.delete(videoId);
+      for (const k of Object.keys(localStorage).filter((k) =>
         k.startsWith(`caption_content_${videoId}_`),
-      );
-      for (const k of keys) localStorage.removeItem(k);
-
-      // 6. Async: stamp DELETED in IDB and physically delete the record
+      )) {
+        localStorage.removeItem(k);
+      }
       deleteSession(videoId).catch(() => {});
-
-      // 7. Remove from video localStorage cache
       deleteVideo(videoId);
-
-      // 8. Remove from in-memory task map and all refs
       removeTask(videoId);
-
-      // 9. Notify parent so the video card is removed from UI immediately
       onVideoRemovedRef.current?.(videoId);
     },
     [removeTask],
@@ -850,30 +1084,46 @@ export function UploadManagerProvider({
       if (!pausedByUserRef.current.has(videoId)) return;
       pausedByUserRef.current.delete(videoId);
       networkPausedRef.current.delete(videoId);
-      const resumeProgress = currentProgressRef.current.get(videoId) ?? 0;
+      const p = currentProgressRef.current.get(videoId) ?? 0;
       updateTask(videoId, {
         isPaused: false,
         stage: "uploading",
-        statusMsg: `Uploading... ${resumeProgress}%`,
+        statusMsg: `Uploading... ${p}%`,
       });
-      // The pause-wait loop inside runUpload detects the removal from pausedByUserRef
-      // and continues the retry loop automatically — no need to call runUpload again.
+      // pause-wait loop inside runUpload detects pausedByUserRef removal and continues
     },
     [updateTask],
   );
 
-  // Factory reset: abort all uploads when factory-reset event fires
-  // biome-ignore lint/correctness/useExhaustiveDependencies: cancelUpload is stable
-  useEffect(() => {
-    const handleFactoryReset = () => {
-      for (const videoId of uploadTasks.keys()) {
-        cancelUpload(videoId);
+  const retryFinalize = useCallback(
+    (videoId: string) => {
+      const data = finalizeDataRef.current.get(videoId);
+      if (!data) {
+        console.warn("[upload] retryFinalize: no data for", videoId);
+        return;
       }
+      runnerActiveRef.current.delete(videoId);
+      finalizingStartTimeRef.current.set(videoId, Date.now());
+      updateTask(videoId, {
+        stage: "finalizing",
+        progress: 99,
+        statusMsg: "Processing video...",
+        canRetryFinalize: false,
+      });
+      runFinalize(videoId, data.finalHash, data.sc, data.params, data.video);
+    },
+    [updateTask, runFinalize],
+  );
+
+  // Factory reset
+  // biome-ignore lint/correctness/useExhaustiveDependencies: stable
+  useEffect(() => {
+    const handler = () => {
+      for (const videoId of uploadTasks.keys()) cancelUpload(videoId);
       uploadParamsRef.current = new Map();
     };
-    window.addEventListener("factory-reset", handleFactoryReset);
-    return () =>
-      window.removeEventListener("factory-reset", handleFactoryReset);
+    window.addEventListener("factory-reset", handler);
+    return () => window.removeEventListener("factory-reset", handler);
   }, [uploadTasks]);
 
   return (
@@ -884,6 +1134,7 @@ export function UploadManagerProvider({
         cancelUpload,
         pauseUpload,
         resumeUpload,
+        retryFinalize,
       }}
     >
       {children}

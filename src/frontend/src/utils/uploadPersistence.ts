@@ -3,6 +3,7 @@ const STORE_NAME = "sessions";
 const DB_VERSION = 2;
 
 const DELETED_UPLOADS_KEY = "subpremium_deleted_uploads";
+const FAILURE_COUNT_PREFIX = "subpremium_upload_fail_";
 
 export interface PersistedSession {
   videoId: string;
@@ -26,6 +27,11 @@ export interface PersistedSession {
   /** Lifecycle status — "uploading" while active, "DELETED" when removed.
    *  Used as a hard guard so deleted sessions never survive a reload. */
   status?: "uploading" | "DELETED";
+  /** Final blob hash stored after all chunks are uploaded successfully.
+   *  Used to resume finalization without re-uploading chunks. */
+  finalHash?: string;
+  /** True if all chunks are done and we are in the finalization stage. */
+  finalizePending?: boolean;
 }
 
 // ─── Tombstone helpers (localStorage — synchronous) ───────────────────────────
@@ -57,6 +63,33 @@ export function clearDeletedUploadMark(videoId: string): void {
     if (!raw) return;
     const set = (JSON.parse(raw) as string[]).filter((id) => id !== videoId);
     localStorage.setItem(DELETED_UPLOADS_KEY, JSON.stringify(set));
+  } catch {}
+}
+
+// ─── Failure count helpers (localStorage — synchronous) ──────────────────────
+
+export function getUploadFailureCount(videoId: string): number {
+  try {
+    const raw = localStorage.getItem(`${FAILURE_COUNT_PREFIX}${videoId}`);
+    return raw ? Number.parseInt(raw, 10) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export function incrementUploadFailureCount(videoId: string): void {
+  try {
+    const current = getUploadFailureCount(videoId);
+    localStorage.setItem(
+      `${FAILURE_COUNT_PREFIX}${videoId}`,
+      String(current + 1),
+    );
+  } catch {}
+}
+
+export function clearUploadFailureCount(videoId: string): void {
+  try {
+    localStorage.removeItem(`${FAILURE_COUNT_PREFIX}${videoId}`);
   } catch {}
 }
 
@@ -136,6 +169,42 @@ export async function updateUploadProgress(
     db.close();
   } catch (err) {
     console.error("[uploadPersistence] updateUploadProgress error:", err);
+  }
+}
+
+/**
+ * Save finalHash and mark finalizePending after all chunks are confirmed uploaded.
+ * Allows finalization to be retried after a page reload.
+ */
+export async function saveFinalizePending(
+  videoId: string,
+  finalHash: string,
+): Promise<void> {
+  if (isUploadDeleted(videoId)) return;
+  try {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const getReq = store.get(videoId);
+      getReq.onsuccess = () => {
+        const record = getReq.result as PersistedSession | undefined;
+        if (!record || record.status === "DELETED") {
+          resolve();
+          return;
+        }
+        record.finalHash = finalHash;
+        record.finalizePending = true;
+        const putReq = store.put(record);
+        putReq.onsuccess = () => resolve();
+        putReq.onerror = () => reject(putReq.error);
+      };
+      getReq.onerror = () => reject(getReq.error);
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  } catch (err) {
+    console.error("[uploadPersistence] saveFinalizePending error:", err);
   }
 }
 
@@ -228,7 +297,27 @@ export async function loadAllSessions(): Promise<PersistedSession[]> {
         continue;
       }
 
-      // Hard filter 4: missing or inaccessible file blob
+      // Hard filter 4: too many failures — permanently failed, don't restore
+      if (getUploadFailureCount(session.videoId) >= 3) {
+        markUploadDeleted(session.videoId);
+        deleteSession(session.videoId).catch(() => {});
+        clearUploadFailureCount(session.videoId);
+        continue;
+      }
+
+      // Hard filter 5: stuck at zero bytes + old enough to be dead (>10s)
+      // Only applies if NOT in finalizePending state (those can have uploadedBytes === fileSize)
+      if (
+        !session.finalizePending &&
+        session.uploadedBytes === 0 &&
+        Date.now() - (session.createdAt ?? 0) > 10_000
+      ) {
+        markUploadDeleted(session.videoId);
+        deleteSession(session.videoId).catch(() => {});
+        continue;
+      }
+
+      // Hard filter 6: missing or inaccessible file blob
       // Ghost uploads always fail here — no valid File means no real upload
       if (!isValidFile(session.file)) {
         // Purge from IDB so it never re-surfaces
@@ -289,6 +378,7 @@ export async function deleteSession(videoId: string): Promise<void> {
     db.close();
     // IDB record is gone — safe to clean up the localStorage tombstone
     clearDeletedUploadMark(videoId);
+    clearUploadFailureCount(videoId);
   } catch (err) {
     console.error("[uploadPersistence] deleteSession error:", err);
     // Leave tombstone in place — it will keep guarding against re-hydration
