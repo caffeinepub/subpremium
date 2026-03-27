@@ -13,6 +13,10 @@ interface VideoCardProps {
   onCreatorClick?: (creatorId: string, creatorName: string) => void;
 }
 
+function isProcessingStatus(status: string): boolean {
+  return status === "processing" || status === "PROCESSING";
+}
+
 export function VideoCard({
   video,
   onClick,
@@ -20,6 +24,8 @@ export function VideoCard({
   watchedPercent = 0,
   onCreatorClick,
 }: VideoCardProps) {
+  const isProcessing = isProcessingStatus(video.status);
+
   return (
     <button
       type="button"
@@ -51,14 +57,13 @@ export function VideoCard({
             </svg>
           </div>
         )}
-        {/* Processing overlay */}
-        {video.status === "processing" && (
-          <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-1">
-            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            <span className="text-white text-[10px] font-semibold">
-              Processing video...
+        {/* Processing badge (top-left) — visible but tappable */}
+        {isProcessing && (
+          <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 bg-black/70 backdrop-blur-sm rounded-full">
+            <div className="w-2 h-2 border border-white/40 border-t-white rounded-full animate-spin" />
+            <span className="text-white text-[9px] font-semibold tracking-wide">
+              Processing
             </span>
-            <span className="text-white/60 text-[9px]">HD ready soon</span>
           </div>
         )}
         {/* Duration badge */}

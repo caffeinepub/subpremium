@@ -1,29 +1,47 @@
 # SubPremium
 
 ## Current State
-Full-featured video platform with persistent auth, chunked uploads, video management, creator dashboard, and settings. MenuView has logout and settings. useAuth has logout(). useUploadManager has cancelUpload(). Backend has logoutUser and deleteVideo.
+- `Video` type has `status: 'uploading' | 'processing' | 'ready'`
+- `VideoRecord` in Motoko has `status: Text`, but no `previewFrameUrl` or `lowQualityUrl` fields
+- `isPublished` in backend only allows `ready/READY/PUBLIC/public` — excludes `processing`
+- `VideoCard` shows a spinner overlay when `status === 'processing'` but tapping still tries to open the player
+- `VideoDetailView` ignores processing status; always attempts to load the full video URL
+- No polling of video status while watching
+- No fallback playback (low-quality or preview-only) for processing videos
+- Home feed `readyVideos` does include `processing` videos, but player has no special handling
 
 ## Requested Changes (Diff)
 
 ### Add
-- `deleteUserAccount(token)` backend method: deletes user record, all their videos, all sessions, all user data (watchLater, history, playlists, subscriptions, watchProgress, settings)
-- `ClearAllDataModal` component: shows confirmation dialog with warning text, then executes full factory reset
-- "Clear All Data" danger button in MenuView (visible only when logged in)
+- `previewFrameUrl?: Text` and `lowQualityUrl?: Text` fields to `VideoRecord` and `VideoInput` in Motoko
+- Backend `getAllVideos` / `getVideo` must include processing-status videos in results (add `processing` to `isPublished`)
+- `Video` TS type: add `previewFrameUrl?: string` and `lowQualityUrl?: string`
+- `VideoCard`: show a "Processing" badge when `status === 'processing'`; keep existing tap behavior (allow tap)
+- `VideoDetailView`: tap-to-watch logic for processing videos:
+  - If `lowQualityUrl` exists → load and play it immediately
+  - Else if `previewFrameUrl` exists → show thumbnail in full-screen preview state
+  - Else → show processing screen (thumbnail, "Processing video...", spinner)
+  - Poll backend every 4s while `status !== 'ready'`; when HD becomes available seamlessly switch `<video>` src
+  - Show "HD ready soon" indicator while processing; hide badge once `status === 'ready'`
+  - NEVER load main `videoUrl` (HD) when status is processing
+- `videoMapper` (backend→frontend) must map new `previewFrameUrl` and `lowQualityUrl` fields
 
 ### Modify
-- `useAuth.ts`: expose `factoryReset()` that calls backend delete, clears all localStorage/sessionStorage, returns so App can redirect to login
-- `MenuView.tsx`: add "Clear All Data" button that opens the modal
-- `App.tsx`: pass `onFactoryReset` callback down to MenuView which navigates to login after reset
-- `backend.d.ts`: add `deleteUserAccount` signature
-- `main.mo`: add `deleteUserAccount` public method
+- Backend `isPublished` to also accept `"processing"` and `"PROCESSING"`
+- `VideoInput` type in Motoko to accept optional `previewFrameUrl` and `lowQualityUrl` (default to `""`)
+- `addVideo` to store those fields from input
+- `updateVideoStatus` (or a new `updateVideoUrls`) to allow setting `lowQualityUrl` and `previewFrameUrl` on an existing video
+- `VideoDetailView` player section: check `status === 'processing'` before mounting `<video>` element
 
 ### Remove
-- Nothing removed
+- Nothing removed; existing spinner overlay on `VideoCard` can remain, just add the badge
 
 ## Implementation Plan
-1. Add `deleteUserAccount(token)` to main.mo — deletes user from usersByEmail+usersById, all their videos, their sessions, userData, subscriptions, watchProgress, settings
-2. Add signature to backend.d.ts
-3. Add `factoryReset()` to useAuth.ts — calls backend deleteUserAccount, aborts uploads via cancelUpload event, clears ALL client storage (localStorage, sessionStorage, caches, IndexedDB databases), calls setUser(null)
-4. Create ClearAllDataModal.tsx — AlertDialog with the required warning text, 2-step confirm (type or press button), calls factoryReset on confirm
-5. Add "Clear All Data" button in MenuView, wired to modal
-6. App.tsx: handle post-reset redirect to login via a reset callback prop
+1. Update Motoko `VideoRecord` and `VideoInput` with `previewFrameUrl` and `lowQualityUrl` fields
+2. Update `isPublished` to include `processing`
+3. Add/extend `updateVideoStatus` to support setting preview/low-quality URLs
+4. Update `backend.did.d.ts` bindings to reflect new fields
+5. Extend `Video` TS type with `previewFrameUrl` and `lowQualityUrl`
+6. Update videoMapper to map new backend fields
+7. Update `VideoCard` to show "Processing" badge for processing status
+8. Update `VideoDetailView`: implement tap-to-watch with fallback chain + status polling + seamless HD upgrade

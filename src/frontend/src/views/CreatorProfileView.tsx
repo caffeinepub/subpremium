@@ -38,7 +38,7 @@ function videoRecordToVideo(r: VideoRecord): Video {
     likes: Number(r.likes),
     dislikes: Number(r.dislikes),
     createdAt: Number(r.createdAt),
-    status: r.status as "uploading" | "processing" | "ready",
+    status: r.status as Video["status"],
     comments: r.comments.map((c) => ({
       id: c.commentId,
       text: c.text,
@@ -49,6 +49,8 @@ function videoRecordToVideo(r: VideoRecord): Video {
     likedBy: r.likedBy,
     dislikedBy: r.dislikedBy,
     sources: r.videoUrl ? [{ quality: "Auto", url: r.videoUrl }] : undefined,
+    previewFrameUrl: (r as any).previewFrameUrl || undefined,
+    lowQualityUrl: (r as any).lowQualityUrl || undefined,
   };
 }
 

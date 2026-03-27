@@ -48,6 +48,8 @@ export interface VideoRecord {
   'status' : string,
   'title' : string,
   'thumbnailUrl' : string,
+  'previewFrameUrl' : string,
+  'lowQualityUrl' : string,
   'views' : bigint,
   'isPremium' : boolean,
   'createdAt' : bigint,
@@ -69,6 +71,8 @@ export interface VideoUpdateInput {
   'status' : string,
   'videoUrl' : string,
   'videoId' : string,
+  'previewFrameUrl' : string,
+  'lowQualityUrl' : string,
 }
 export interface _CaffeineStorageCreateCertificateResult {
   'method' : string,

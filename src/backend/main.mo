@@ -63,7 +63,9 @@ actor {
     createdAt : Int;
   };
 
-  type VideoRecord = {
+  // Migration type: shape of VideoRecord before previewFrameUrl/lowQualityUrl were added.
+  // Kept only for stable variable upgrade migration.
+  type OldVideoRecord = {
     videoId : Text;
     title : Text;
     description : Text;
@@ -71,6 +73,30 @@ actor {
     creatorName : Text;
     videoUrl : Text;
     thumbnailUrl : Text;
+    durationSeconds : Nat;
+    fileSizeBytes : Nat;
+    views : Nat;
+    likes : Nat;
+    dislikes : Nat;
+    createdAt : Int;
+    status : Text;
+    blobHash : Text;
+    comments : [Comment];
+    likedBy : [Text];
+    dislikedBy : [Text];
+    isPremium : Bool;
+  };
+
+    type VideoRecord = {
+    videoId : Text;
+    title : Text;
+    description : Text;
+    creatorId : Text;
+    creatorName : Text;
+    videoUrl : Text;
+    thumbnailUrl : Text;
+    previewFrameUrl : Text;
+    lowQualityUrl : Text;
     durationSeconds : Nat;
     fileSizeBytes : Nat;
     views : Nat;
@@ -101,6 +127,8 @@ actor {
     videoId : Text;
     videoUrl : Text;
     status : Text;
+    previewFrameUrl : Text;
+    lowQualityUrl : Text;
   };
 
   type HistoryEntry = {
@@ -171,7 +199,13 @@ actor {
   stable var videoCounter : Nat = 0;
   stable var commentCounter : Nat = 0;
 
-  stable var videos = Map.empty<Text, VideoRecord>();
+  // Legacy stable var — matches the deployed shape (no previewFrameUrl/lowQualityUrl).
+  // ICP will deserialize the existing canister data into this var on upgrade.
+  stable var videos = Map.empty<Text, OldVideoRecord>();
+  // New stable map with extended VideoRecord shape.
+  // Populated from `videos` on first postupgrade, then used for all runtime ops.
+  stable var videosV2 = Map.empty<Text, VideoRecord>();
+  stable var videosMigrated : Bool = false;
 
   stable var principalToUserId = Map.empty<Principal, Text>();
 
@@ -338,12 +372,12 @@ actor {
           case null { return false };
           case (?user) {
             // Delete all videos owned by this user
-            let userVideoIds : [Text] = videos.entries()
+            let userVideoIds : [Text] = videosV2.entries()
               .filter(func((_k, v)) { v.creatorId == userId })
               .map(func((k, _v)) { k })
               .toArray();
             for (videoId in userVideoIds.vals()) {
-              videos.remove(videoId);
+              videosV2.remove(videoId);
             };
 
             // Delete all access sessions for this user
@@ -488,6 +522,8 @@ actor {
       creatorName = videoInput.creatorName;
       videoUrl = "";
       thumbnailUrl = videoInput.thumbnailUrl;
+      previewFrameUrl = videoInput.thumbnailUrl; // use thumbnail as initial preview frame
+      lowQualityUrl = "";
       durationSeconds = videoInput.durationSeconds;
       fileSizeBytes = videoInput.fileSizeBytes;
       views = 0;
@@ -501,52 +537,61 @@ actor {
       dislikedBy = [];
       isPremium = videoInput.isPremium;
     };
-    videos.add(videoId, video);
+    videosV2.add(videoId, video);
     video;
   };
 
   public query func getVideo(videoId : Text) : async ?VideoRecord {
-    videos.get(videoId);
+    videosV2.get(videoId);
   };
 
   func isPublished(status : Text) : Bool {
     status == "ready" or status == "READY" or status == "PUBLIC" or status == "public"
+    or status == "processing" or status == "PROCESSING"
   };
 
   public query func getAllVideos() : async [VideoRecord] {
-    videos.values().filter(func(v) { isPublished(v.status) }).toArray();
+    videosV2.values().filter(func(v) { isPublished(v.status) }).toArray();
   };
 
   public query func getVideosByCreator(creatorId : Text) : async [VideoRecord] {
-    videos.values().filter(func(video) { video.creatorId == creatorId }).toArray();
+    videosV2.values().filter(func(video) { video.creatorId == creatorId }).toArray();
   };
 
   public shared func updateVideoStatus(input : VideoUpdateInput) : async Bool {
-    switch (videos.get(input.videoId)) {
+    switch (videosV2.get(input.videoId)) {
       case (null) { false };
       case (?video) {
-        videos.add(input.videoId, { video with videoUrl = input.videoUrl; status = input.status });
+        let newPreview = if (input.previewFrameUrl == "") { video.previewFrameUrl } else { input.previewFrameUrl };
+        let newLowQ = if (input.lowQualityUrl == "") { video.lowQualityUrl } else { input.lowQualityUrl };
+        videosV2.add(input.videoId, {
+          video with
+          videoUrl = input.videoUrl;
+          status = input.status;
+          previewFrameUrl = newPreview;
+          lowQualityUrl = newLowQ;
+        });
         true;
       };
     };
   };
 
   public shared func deleteVideo(videoId : Text) : async Bool {
-    switch (videos.get(videoId)) {
+    switch (videosV2.get(videoId)) {
       case (null) { false };
-      case (?_) { videos.remove(videoId); true };
+      case (?_) { videosV2.remove(videoId); true };
     };
   };
 
   public shared func toggleLike(videoId : Text, userId : Text) : async Bool {
     if (userId == "") { return false };
-    switch (videos.get(videoId)) {
+    switch (videosV2.get(videoId)) {
       case (null) { false };
       case (?video) {
         let hasLiked = video.likedBy.find(func(id) { id == userId }).isSome();
         let updatedLikedBy = if (hasLiked) { video.likedBy.filter(func(id) { id != userId }) } else { video.likedBy.concat([userId]) };
         let updatedLikes = if (hasLiked) { video.likes - 1 } else { video.likes + 1 };
-        videos.add(videoId, { video with likedBy = updatedLikedBy; likes = updatedLikes });
+        videosV2.add(videoId, { video with likedBy = updatedLikedBy; likes = updatedLikes });
         true;
       };
     };
@@ -554,13 +599,13 @@ actor {
 
   public shared func toggleDislike(videoId : Text, userId : Text) : async Bool {
     if (userId == "") { return false };
-    switch (videos.get(videoId)) {
+    switch (videosV2.get(videoId)) {
       case (null) { false };
       case (?video) {
         let hasDisliked = video.dislikedBy.find(func(id) { id == userId }).isSome();
         let updatedDislikedBy = if (hasDisliked) { video.dislikedBy.filter(func(id) { id != userId }) } else { video.dislikedBy.concat([userId]) };
         let updatedDislikes = if (hasDisliked) { video.dislikes - 1 } else { video.dislikes + 1 };
-        videos.add(videoId, { video with dislikedBy = updatedDislikedBy; dislikes = updatedDislikes });
+        videosV2.add(videoId, { video with dislikedBy = updatedDislikedBy; dislikes = updatedDislikes });
         true;
       };
     };
@@ -572,7 +617,7 @@ actor {
       case null { "Anonymous" };
       case (?user) { user.displayName };
     };
-    switch (videos.get(videoId)) {
+    switch (videosV2.get(videoId)) {
       case (null) { false };
       case (?video) {
         commentCounter += 1;
@@ -583,31 +628,31 @@ actor {
           authorName;
           createdAt = Time.now();
         };
-        videos.add(videoId, { video with comments = [comment].concat(video.comments) });
+        videosV2.add(videoId, { video with comments = [comment].concat(video.comments) });
         true;
       };
     };
   };
 
   public query func getComments(videoId : Text) : async [Comment] {
-    switch (videos.get(videoId)) {
+    switch (videosV2.get(videoId)) {
       case (null) { [] };
       case (?video) { video.comments };
     };
   };
 
   public shared func incrementViewCount(videoId : Text) : async Bool {
-    switch (videos.get(videoId)) {
+    switch (videosV2.get(videoId)) {
       case (null) { false };
       case (?video) {
-        videos.add(videoId, { video with views = video.views + 1 });
+        videosV2.add(videoId, { video with views = video.views + 1 });
         true;
       };
     };
   };
 
   public query func searchVideos(searchTerm : Text) : async [VideoRecord] {
-    videos.values().filter(func(video) { isPublished(video.status) and video.title.contains(#text searchTerm) }).toArray();
+    videosV2.values().filter(func(video) { isPublished(video.status) and video.title.contains(#text searchTerm) }).toArray();
   };
 
   // --- User settings persistence ---
@@ -624,13 +669,13 @@ actor {
 
   public shared func updateVideoMeta(videoId : Text, title : Text, description : Text, thumbnailUrl : Text, requestingUserId : Text) : async Bool {
     if (requestingUserId == "") { return false };
-    switch (videos.get(videoId)) {
+    switch (videosV2.get(videoId)) {
       case (null) { false };
       case (?video) {
         if (video.creatorId != requestingUserId) { return false };
         let newTitle = if (title == "") { video.title } else { title };
         let newThumb = if (thumbnailUrl == "") { video.thumbnailUrl } else { thumbnailUrl };
-        videos.add(videoId, { video with title = newTitle; description; thumbnailUrl = newThumb });
+        videosV2.add(videoId, { video with title = newTitle; description; thumbnailUrl = newThumb });
         true;
       };
     };
@@ -638,6 +683,43 @@ actor {
 
   public query func getUserSettings(userId : Text) : async ?UserSettings {
     userSettingsMap.get(userId)
+  };
+
+
+  // Migration: on first deploy after adding previewFrameUrl/lowQualityUrl,
+  // copy records from `videos` (old OldVideoRecord shape) into `videosV2` (new VideoRecord shape).
+  system func postupgrade() {
+    if (not videosMigrated) {
+      for ((k, v) in videos.entries()) {
+        // Only migrate if not already present in videos
+        if (videosV2.get(k) == null) {
+          videosV2.add(k, {
+            videoId = v.videoId;
+            title = v.title;
+            description = v.description;
+            creatorId = v.creatorId;
+            creatorName = v.creatorName;
+            videoUrl = v.videoUrl;
+            thumbnailUrl = v.thumbnailUrl;
+            previewFrameUrl = v.thumbnailUrl; // use thumbnail as initial preview
+            lowQualityUrl = "";
+            durationSeconds = v.durationSeconds;
+            fileSizeBytes = v.fileSizeBytes;
+            views = v.views;
+            likes = v.likes;
+            dislikes = v.dislikes;
+            createdAt = v.createdAt;
+            status = v.status;
+            blobHash = v.blobHash;
+            comments = v.comments;
+            likedBy = v.likedBy;
+            dislikedBy = v.dislikedBy;
+            isPremium = v.isPremium;
+          });
+        };
+      };
+      videosMigrated := true;
+    };
   };
 
 };

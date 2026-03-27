@@ -52,18 +52,21 @@ export function HomeView({
   const [confirmCancelId, setConfirmCancelId] = useState<string | null>(null);
 
   // Pending = video card has an ACTIVE upload task (never show stale backend statuses)
-  // biome-ignore lint/correctness/useExhaustiveDependencies: isReady is a stable module-level function
   const pendingVideos = useMemo(
     () => videos.filter((v) => !isReady(v.status) && uploadTasks.has(v.id)),
     [videos, uploadTasks],
   );
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: isReady is a stable module-level function
   const readyVideos = useMemo(() => {
     const seen = new Set<string>();
     return videos.filter((v) => {
       // Include both ready AND processing videos in the feed (TikTok/YouTube style)
-      if (!isReady(v.status) && v.status !== "processing") return false;
+      if (
+        !isReady(v.status) &&
+        v.status !== "processing" &&
+        v.status !== "PROCESSING"
+      )
+        return false;
       if (seen.has(v.id)) return false;
       seen.add(v.id);
       return true;

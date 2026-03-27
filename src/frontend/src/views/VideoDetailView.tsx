@@ -166,10 +166,27 @@ export function VideoDetailView({
   const autoplayCancelledRef = useRef(false);
   const autoplayTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [showPlayNextFallback, setShowPlayNextFallback] = useState(false);
+  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const preloadVideoRef = useRef<HTMLVideoElement | null>(null);
+  const [activeQuality, setActiveQuality] = useState<
+    "sd" | "hd" | "processing"
+  >("processing");
+  const [showHDToast, setShowHDToast] = useState(false);
 
   // Suggestions: other ready videos excluding current
+  const isProcessing =
+    currentVideo.status === "processing" ||
+    currentVideo.status === "PROCESSING";
+
   const suggestions = allVideos
-    .filter((v) => v.id !== currentVideo.id && v.status === "ready")
+    .filter(
+      (v) =>
+        v.id !== currentVideo.id &&
+        (v.status === "ready" ||
+          v.status === "READY" ||
+          v.status === "PUBLIC" ||
+          v.status === "public"),
+    )
     .slice(0, 10);
 
   const nextVideo = suggestions[0] ?? null;
@@ -181,6 +198,27 @@ export function VideoDetailView({
     setVideoError(false);
 
     async function loadUrl() {
+      // --- Processing video: fallback order ---
+      if (isProcessing) {
+        if (currentVideo.lowQualityUrl) {
+          // Play low-quality stream immediately
+          if (!cancelled) {
+            setVideoUrl(currentVideo.lowQualityUrl);
+            setActiveQuality("sd");
+            setLoadingVideo(false);
+          }
+        } else {
+          // Show preview frame or placeholder (no stream yet)
+          if (!cancelled) {
+            setVideoUrl(null);
+            setActiveQuality("processing");
+            setLoadingVideo(false);
+          }
+        }
+        return;
+      }
+
+      // --- Ready video: normal resolution ---
       // If the video already has a direct URL source from the backend, use it
       const directSource = currentVideo.sources?.find(
         (s) => s.quality === "Auto" && s.url,
@@ -235,7 +273,128 @@ export function VideoDetailView({
     return () => {
       cancelled = true;
     };
-  }, [currentVideo.blobHash, currentVideo.sources, identity, isFetching]);
+  }, [
+    currentVideo.blobHash,
+    currentVideo.sources,
+    currentVideo.lowQualityUrl,
+    isProcessing,
+    identity,
+    isFetching,
+  ]);
+
+  // Poll for HD readiness when video is processing
+  // biome-ignore lint/correctness/useExhaustiveDependencies: polling uses refs and stable callbacks
+  useEffect(() => {
+    if (!isProcessing || !actor || isFetching) return;
+
+    const switchToHD = (
+      hdUrl: string,
+      rec: { status: string; videoUrl?: string; blobHash?: string },
+    ) => {
+      // Clear poll first
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+
+      // Build updated video state
+      const updatedVideo: Video = {
+        ...currentVideo,
+        status: "ready",
+        sources: hdUrl
+          ? [{ quality: "Auto", url: hdUrl }]
+          : currentVideo.sources,
+        blobHash: rec.blobHash || currentVideo.blobHash,
+      };
+
+      // Seamless src swap: preserve time + play state
+      const doSwitch = () => {
+        const el = videoRef.current;
+        if (el && hdUrl) {
+          const currentTime = el.currentTime;
+          const wasPaused = el.paused;
+          el.src = hdUrl;
+          el.currentTime = currentTime;
+          if (!wasPaused) {
+            el.play().catch(() => {
+              /* silent */
+            });
+          }
+        } else if (hdUrl) {
+          // No element yet (processing placeholder was showing) — use React state
+          setVideoUrl(hdUrl);
+        }
+        // Update React state to reflect new URL for download link etc.
+        setVideoUrl(hdUrl || null);
+        setActiveQuality("hd");
+        setCurrentVideo(updatedVideo);
+        onVideoUpdate(updatedVideo);
+
+        // Show "HD Ready" in-player toast
+        setShowHDToast(true);
+        setTimeout(() => setShowHDToast(false), 2500);
+      };
+
+      if (!hdUrl) {
+        // No HD url available yet — just update state
+        setCurrentVideo(updatedVideo);
+        onVideoUpdate(updatedVideo);
+        return;
+      }
+
+      // Preload strategy: buffer via hidden element, switch on canplay or 2s timeout
+      const preload = document.createElement("video");
+      preload.preload = "metadata";
+      preload.src = hdUrl;
+      preloadVideoRef.current = preload;
+
+      let switched = false;
+      const switchOnce = () => {
+        if (switched) return;
+        switched = true;
+        preload.oncanplay = null;
+        preload.onerror = null;
+        doSwitch();
+      };
+
+      const fallbackTimer = setTimeout(switchOnce, 2000);
+      preload.oncanplay = () => {
+        clearTimeout(fallbackTimer);
+        switchOnce();
+      };
+      preload.onerror = () => {
+        clearTimeout(fallbackTimer);
+        // HD errored — stay on SD silently
+        preloadVideoRef.current = null;
+      };
+      preload.load();
+    };
+
+    pollIntervalRef.current = setInterval(async () => {
+      try {
+        const rec = await actor.getVideo(currentVideo.id);
+        if (!rec) return;
+        const newStatus = rec.status;
+        const isNowReady =
+          newStatus === "ready" ||
+          newStatus === "READY" ||
+          newStatus === "PUBLIC" ||
+          newStatus === "public";
+        if (!isNowReady) return;
+        const hdUrl = rec.videoUrl || "";
+        switchToHD(hdUrl, rec);
+      } catch (e) {
+        console.warn("[poll] status check failed:", e);
+      }
+    }, 4000);
+
+    return () => {
+      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      if (preloadVideoRef.current) {
+        preloadVideoRef.current.oncanplay = null;
+        preloadVideoRef.current.onerror = null;
+        preloadVideoRef.current.src = "";
+        preloadVideoRef.current = null;
+      }
+    };
+  }, [isProcessing, actor, isFetching, currentVideo.id]);
 
   // Track history, views, and increment backend view count once on mount
   useEffect(() => {
@@ -394,13 +553,15 @@ export function VideoDetailView({
 
   // Autoplay: start countdown when video ends
   const handleVideoEnded = useCallback(() => {
+    // Don't autoplay from a processing video
+    if (isProcessing) return;
     if (!nextVideo || !onVideoSelect) {
       setShowPlayNextFallback(true);
       return;
     }
     autoplayCancelledRef.current = false;
     setAutoplayCountdown(5);
-  }, [nextVideo, onVideoSelect]);
+  }, [nextVideo, onVideoSelect, isProcessing]);
 
   // Countdown tick
   useEffect(() => {
@@ -769,6 +930,31 @@ export function VideoDetailView({
             </div>
           </div>
         )}
+        {/* Processing placeholder overlay (no stream available) */}
+        {isProcessing && !videoUrl && !loadingVideo && (
+          <div
+            data-ocid="video.processing_state"
+            className="absolute inset-0 flex flex-col items-center justify-center bg-black"
+            style={
+              currentVideo.thumbnailDataUrl
+                ? {
+                    backgroundImage: `url(${currentVideo.thumbnailDataUrl})`,
+                    backgroundSize: "cover",
+                    backgroundPosition: "center",
+                  }
+                : undefined
+            }
+          >
+            <div className="absolute inset-0 bg-black/60" />
+            <div className="relative z-10 flex flex-col items-center gap-3 text-center px-6">
+              <div className="w-12 h-12 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              <p className="text-white text-base font-semibold">
+                Processing video...
+              </p>
+              <p className="text-white/60 text-sm">HD ready soon</p>
+            </div>
+          </div>
+        )}
         {videoUrl && !videoError && (
           // biome-ignore lint/a11y/useMediaCaption: captions handled via custom overlay
           <video
@@ -803,6 +989,42 @@ export function VideoDetailView({
           />
         )}
 
+        {/* Quality badge — top-left of player */}
+        {(activeQuality === "sd" || activeQuality === "hd") && (
+          <div
+            className={`absolute top-2 left-2 z-10 px-2 py-0.5 rounded text-[10px] font-bold tracking-widest select-none transition-all duration-300 ${
+              activeQuality === "hd"
+                ? "bg-blue-500/90 text-white shadow-lg shadow-blue-500/30"
+                : "bg-black/60 text-white/70"
+            }`}
+          >
+            {activeQuality === "hd" ? "HD" : "SD"}
+          </div>
+        )}
+
+        {/* "HD ready soon" spinner badge while SD is playing */}
+        {isProcessing && videoUrl && activeQuality === "sd" && (
+          <div className="absolute bottom-12 left-2 z-10 flex items-center gap-1.5 px-2.5 py-1 bg-black/70 backdrop-blur-sm rounded-full">
+            <div className="w-2 h-2 border border-white/40 border-t-white rounded-full animate-spin" />
+            <span className="text-white text-[10px] font-semibold">
+              HD ready soon
+            </span>
+          </div>
+        )}
+
+        {/* In-player "HD Ready" toast — fades in then out */}
+        <div
+          aria-live="polite"
+          className={`pointer-events-none absolute inset-0 z-20 flex items-center justify-center transition-opacity duration-500 ${
+            showHDToast ? "opacity-100" : "opacity-0"
+          }`}
+        >
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-blue-600/90 backdrop-blur-sm rounded-full shadow-xl">
+            <span className="text-white text-sm font-semibold tracking-wide">
+              ✦ HD Ready
+            </span>
+          </div>
+        </div>
         {/* CC + Settings overlay */}
         <div className="absolute top-2 right-2 z-10 flex items-center gap-1">
           <button

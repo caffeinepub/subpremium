@@ -20,12 +20,21 @@ export interface Video {
   likes: number;
   dislikes: number;
   createdAt: number;
-  status: "uploading" | "processing" | "ready";
+  status:
+    | "uploading"
+    | "processing"
+    | "PROCESSING"
+    | "ready"
+    | "READY"
+    | "PUBLIC"
+    | "public";
   comments: Comment[];
   likedBy?: string[];
   dislikedBy?: string[];
   captions?: Array<{ lang: string; url: string }>;
   sources?: Array<{ quality: string; url: string }>;
+  previewFrameUrl?: string;
+  lowQualityUrl?: string;
 }
 
 export type ViewName =

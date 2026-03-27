@@ -41,6 +41,8 @@ export const VideoRecord = IDL.Record({
   'status' : IDL.Text,
   'title' : IDL.Text,
   'thumbnailUrl' : IDL.Text,
+  'previewFrameUrl' : IDL.Text,
+  'lowQualityUrl' : IDL.Text,
   'views' : IDL.Nat,
   'isPremium' : IDL.Bool,
   'createdAt' : IDL.Int,
@@ -85,6 +87,8 @@ export const VideoUpdateInput = IDL.Record({
   'status' : IDL.Text,
   'videoUrl' : IDL.Text,
   'videoId' : IDL.Text,
+  'previewFrameUrl' : IDL.Text,
+  'lowQualityUrl' : IDL.Text,
 });
 
 export const idlService = IDL.Service({
@@ -177,6 +181,8 @@ export const idlFactory = ({ IDL }) => {
     'status' : IDL.Text,
     'title' : IDL.Text,
     'thumbnailUrl' : IDL.Text,
+    'previewFrameUrl' : IDL.Text,
+    'lowQualityUrl' : IDL.Text,
     'views' : IDL.Nat,
     'isPremium' : IDL.Bool,
     'createdAt' : IDL.Int,
@@ -218,6 +224,8 @@ export const idlFactory = ({ IDL }) => {
     'status' : IDL.Text,
     'videoUrl' : IDL.Text,
     'videoId' : IDL.Text,
+    'previewFrameUrl' : IDL.Text,
+    'lowQualityUrl' : IDL.Text,
   });
   
   return IDL.Service({
