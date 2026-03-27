@@ -147,6 +147,9 @@ export function UploadManagerProvider({
   >(new Map());
   const forceCheckInFlightRef = useRef<Set<string>>(new Set());
   const forceCheckCountRef = useRef<Map<string, number>>(new Map());
+  const stuck98TimeRef = useRef<Map<string, number>>(new Map());
+  // track if finalize already triggered to prevent double-call
+  const finalizeTriggeredRef = useRef<Set<string>>(new Set());
 
   // ─── helpers ──────────────────────────────────────────────────────────────
 
@@ -183,6 +186,8 @@ export function UploadManagerProvider({
     finalizeDataRef.current.delete(videoId);
     forceCheckInFlightRef.current.delete(videoId);
     forceCheckCountRef.current.delete(videoId);
+    stuck98TimeRef.current.delete(videoId);
+    finalizeTriggeredRef.current.delete(videoId);
   }, []);
 
   // ─── completion helper ────────────────────────────────────────────────────
@@ -310,6 +315,19 @@ export function UploadManagerProvider({
         isSlowNetwork: false,
         canRetryFinalize: false,
       });
+
+      // ── PART 2: Early feed visibility (TikTok/YouTube style) ──
+      // Push video to feed immediately with "processing" status so users can see it
+      const processingVideo: import("../types/video").Video = {
+        ...video,
+        status: "processing",
+        sources: [],
+      };
+      saveVideos([
+        ...getVideos().filter((v) => v.id !== videoId),
+        processingVideo,
+      ]);
+      onVideoAddedRef.current(processingVideo);
 
       const doFinalize = async () => {
         // Captions
@@ -572,6 +590,29 @@ export function UploadManagerProvider({
                   uploadedBytesRef.current.set(videoId, newBytes);
                   await updateUploadProgress(videoId, newBytes, chunkIndex);
 
+                  // ── COMPLETION CHECK: trigger finalize immediately when all bytes uploaded ──
+                  if (
+                    newBytes >= params.file.size &&
+                    !finalizeTriggeredRef.current.has(videoId)
+                  ) {
+                    console.log(
+                      "Finalize triggered",
+                      newBytes,
+                      params.file.size,
+                    );
+                    finalizeTriggeredRef.current.add(videoId);
+                    // Don't wait for UI state — call runFinalize directly
+                    // The outer loop will also call it, but we guard with finalizeTriggeredRef
+                    currentProgressRef.current.set(videoId, 99);
+                    updateTask(videoId, {
+                      stage: "finalizing",
+                      progress: 99,
+                      statusMsg: "Processing video...",
+                      isSlowNetwork: false,
+                    });
+                    return; // Let outer loop call runFinalize
+                  }
+
                   // Progress capped at 98 — 99 is reserved for FINALIZING
                   const newPct = Math.min(
                     bytesToProgress(newBytes, params.file.size),
@@ -581,6 +622,9 @@ export function UploadManagerProvider({
                   if (newPct < cur) return; // monotonic guard
                   currentProgressRef.current.set(videoId, newPct);
                   lastProgressUpdateRef.current.set(videoId, Date.now());
+                  // Track when we hit 98% for anti-stuck safety trigger
+                  if (newPct >= 98)
+                    stuck98TimeRef.current.set(videoId, Date.now());
                   updateTask(videoId, {
                     progress: newPct,
                     stage: "uploading",
@@ -738,12 +782,43 @@ export function UploadManagerProvider({
             });
             changed = true;
           }
+
+          // ── ANTI-STUCK: if progress is 98% for >5s, force finalize ──
+          if (task.progress >= 98 && task.stage === "uploading") {
+            const stuck98 = stuck98TimeRef.current.get(videoId);
+            if (stuck98 && Date.now() - stuck98 > 5000) {
+              const uploadedBytes = uploadedBytesRef.current.get(videoId) ?? 0;
+              const data = finalizeDataRef.current.get(videoId);
+              if (
+                uploadedBytes >=
+                  (data?.params?.file?.size ?? Number.POSITIVE_INFINITY) &&
+                data &&
+                !finalizeTriggeredRef.current.has(videoId)
+              ) {
+                console.log(
+                  "Anti-stuck finalize triggered",
+                  uploadedBytes,
+                  data.params.file.size,
+                );
+                finalizeTriggeredRef.current.add(videoId);
+                stuck98TimeRef.current.delete(videoId);
+                // Fire finalize without blocking the interval
+                runFinalize(
+                  videoId,
+                  data.finalHash,
+                  data.sc,
+                  data.params,
+                  data.video,
+                );
+              }
+            }
+          }
         }
         return changed ? next : prev;
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [forceStatusCheck, updateTask]);
+  }, [forceStatusCheck, updateTask, runFinalize]);
 
   // ─── mount: restore sessions ──────────────────────────────────────────────
   // biome-ignore lint/correctness/useExhaustiveDependencies: runs once on mount

@@ -51,6 +51,16 @@ export function VideoCard({
             </svg>
           </div>
         )}
+        {/* Processing overlay */}
+        {video.status === "processing" && (
+          <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-1">
+            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <span className="text-white text-[10px] font-semibold">
+              Processing video...
+            </span>
+            <span className="text-white/60 text-[9px]">HD ready soon</span>
+          </div>
+        )}
         {/* Duration badge */}
         <div className="absolute bottom-2 right-2 px-1.5 py-0.5 bg-black/80 rounded text-[10px] font-semibold text-white">
           {formatDuration(video.durationSeconds)}

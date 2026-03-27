@@ -62,7 +62,8 @@ export function HomeView({
   const readyVideos = useMemo(() => {
     const seen = new Set<string>();
     return videos.filter((v) => {
-      if (!isReady(v.status)) return false;
+      // Include both ready AND processing videos in the feed (TikTok/YouTube style)
+      if (!isReady(v.status) && v.status !== "processing") return false;
       if (seen.has(v.id)) return false;
       seen.add(v.id);
       return true;
